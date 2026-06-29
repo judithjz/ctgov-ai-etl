@@ -1,7 +1,7 @@
 ctgov:
   api_url: https://clinicaltrials.gov/api/v2/studies
   page_size: 1000
-  resume_from_csv: TRUE
+  resume_from_csv: FALSE
   filter_advanced:
     - AREA[StudyType]INTERVENTIONAL
     - AREA[StartDate]RANGE[2013-05-01,2025-12-31]
@@ -25,13 +25,13 @@ dailymed_api:
   spl_url: https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json
 
 ai_processing:
-  enabled: TRUE
+  enabled: FALSE
   api_key_env: GEMINI_API_KEY
   model: gemini-2.5-flash
   api_delay: 4.0
   # --- AI LIMIT ---
   # Change max_rows to run the AI only on the first N records (e.g., 2000)
-  max_rows: 3
+  max_rows: 100
   debug_only_tuning_trials: FALSE
   row_prompt_template: |
     Analyze the following clinical trial study:

@@ -795,6 +795,50 @@ def fetch_fda_info(interventions: List[str], current_nct_id: str):
     return status_str, safety_str, preg_contra_str, lact_contra_str, cited_str
 
 
+def fetch_openfda_pharm_class(interventions: List[str]) -> str:
+    if not interventions:
+        return "N/A"
+        
+    classes_list = []
+    stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
+    
+    for intv in interventions:
+        if not intv or intv == 'N/A': continue
+        clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
+        if not clean_name: continue
+        
+        words = clean_name.split()
+        clean_words = [w for w in words if w not in stop_words]
+        
+        found_epc = False
+        for length in range(len(clean_words), 0, -1):
+            for start in range(len(clean_words) - length + 1):
+                query = " ".join(clean_words[start:start+length])
+                if len(query) < 4 and length < len(clean_words): continue
+                
+                search_url = f"https://api.fda.gov/drug/label.json?search=openfda.generic_name:\"{urllib.parse.quote(query)}\"+OR+openfda.brand_name:\"{urllib.parse.quote(query)}\"&limit=1"
+                try:
+                    r = requests.get(search_url, timeout=5)
+                    if r.status_code == 200:
+                        data = r.json()
+                        results = data.get('results', [])
+                        if results and 'openfda' in results[0]:
+                            epc = results[0]['openfda'].get('pharm_class_epc', [])
+                            if epc:
+                                classes_list.append(f"[{clean_name.upper()}]: {', '.join(epc)}")
+                                found_epc = True
+                                break
+                except Exception:
+                    pass
+            if found_epc:
+                break
+                
+        if not found_epc:
+            classes_list.append(f"[{clean_name.upper()}]: N/A")
+        
+    return "\n".join(classes_list) if classes_list else "N/A"
+
+
 # ============================================================================
 # TRANSFORM - Functions that transform and process data
 # ============================================================================
@@ -981,6 +1025,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     
     health_canada_approval_str = fetch_health_canada_approval(intervention_names)
     fda_status_str, fda_safety_str, preg_contra_str, lact_contra_str, cited_str = fetch_fda_info(intervention_names, nct_id)
+    openfda_pharm_class_str = fetch_openfda_pharm_class(intervention_names)
     
     # Calculate Consistency
     consistency_str = "N/A"
@@ -1085,6 +1130,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'FDA Pregnancy Status': preg_contra_str,
         'FDA Lactation Status': lact_contra_str,
         'Cited in FDA Label': cited_str,
+        'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_str,
         'Approval Consistency': consistency_str,
         'intervention_types': intervention_types_str,
         'intervention_names': intervention_names_str,
@@ -1376,7 +1422,7 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'allocation', 'intervention_model', 'primary_purpose', 'masking', 'arm_groups',
         'funder_info', 'lead_sponsor', 'lead_sponsor_class', 'collaborators',
         'Health Canada Approval', 'FDA Approved Status', 'Approval Consistency', 'FDA Pregnancy & Lactation Safety',
-        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label'
+        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)'
     ]
     
     # Add all AI columns from config
@@ -1447,6 +1493,18 @@ def main():
                 reader = csv.DictReader(f)
                 transformed_studies = [row for row in reader]
             print(f"📊 Loaded {len(transformed_studies)} studies directly from CSV")
+            
+            # Backfill missing OpenFDA Pharmacologic Class
+            print("🔄 Checking for missing OpenFDA Pharmacologic Class...")
+            for study in transformed_studies:
+                if not study.get('OpenFDA Pharmacologic Class (EPC)'):
+                    intv_str = study.get('intervention_names', '')
+                    if intv_str and intv_str != 'N/A':
+                        intv_list = [i.strip() for i in intv_str.split(',')]
+                        study['OpenFDA Pharmacologic Class (EPC)'] = fetch_openfda_pharm_class(intv_list)
+                    else:
+                        study['OpenFDA Pharmacologic Class (EPC)'] = 'N/A'
+                        
         except Exception as e:
             print(f"❌ Failed to load CSV: {e}")
             sys.exit(1)
