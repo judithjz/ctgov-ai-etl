@@ -1,6 +1,6 @@
 ctgov:
   api_url: https://clinicaltrials.gov/api/v2/studies
-  page_size: 1000
+  page_size: 9000
   resume_from_csv: FALSE
   filter_advanced:
     - AREA[StudyType]INTERVENTIONAL
@@ -16,7 +16,7 @@ output:
   max_rows_per_file: 10000
 
 health_canada_api:
-  enabled: TRUE
+  enabled: FALSE
   disable_cache: TRUE
   product_url: https://health-products.canada.ca/api/drug/drugproduct/?lang=en&type=json
   status_url: https://health-products.canada.ca/api/drug/status/?lang=en&type=json
@@ -24,15 +24,26 @@ health_canada_api:
 dailymed_api:
   spl_url: https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json
 
-ai_processing:
+icd_api:
   enabled: FALSE
+  client_id: "68b62934-c265-42ed-af5d-4c6545df7742_7f4a1ef1-4300-4e69-aa96-9e46fc853c1a"
+  client_secret: "X0WyxX9vpNGJwJADFDphr0fTvgz4tM6RU3WBijY04mA="
+  client_id_env: ICD_CLIENT_ID
+  client_secret_env: ICD_CLIENT_SECRET
+  cache_file: icd_cache.yaml
+  release_id: "2024-01"
+
+ai_processing:
+  enabled: TRUE
   api_key_env: GEMINI_API_KEY
   model: gemini-2.5-flash
   api_delay: 4.0
   # --- AI LIMIT ---
   # Change max_rows to run the AI only on the first N records (e.g., 2000)
-  max_rows: 100
+  max_rows: 9000
   debug_only_tuning_trials: FALSE
+  use_cache: TRUE
+  cache_file: ai_cache.json
   row_prompt_template: |
     Analyze the following clinical trial study:
 
@@ -180,8 +191,8 @@ ai_processing:
         
 
 output:
-  csv_filename: clinical_trials_processed-test.june-7.csv
-  max_rows_per_file: 3000
+  csv_filename: test_june7.csv
+  max_rows_per_file: 9000
 
 tuning_trials:
   

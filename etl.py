@@ -7,6 +7,7 @@ and outputs a CSV with specified columns.
 Configuration is loaded from a JSON or YAML file (default: config.yaml).
 """
 
+from requests import api
 import requests
 import json
 import csv
@@ -24,8 +25,6 @@ from functools import lru_cache
 import yaml
 from google import genai
 from google.genai import types
-import vertexai
-from vertexai.generative_models import GenerativeModel
 
 # ============================================================================
 # CONFIGURATION LOADING
@@ -302,13 +301,6 @@ def _ensure_hc_disk_cache() -> Dict[str, Any]:
     if _hc_disk_cache is not None:
         return _hc_disk_cache
 
-    hc_config = CONFIG.get('health_canada_api', {})
-    disable_cache = hc_config.get('disable_cache', False)
-
-    if disable_cache:
-        _hc_disk_cache = {'active_ingredients': {}, 'status': {}}
-        return _hc_disk_cache
-
     path = _hc_cache_file()
     if os.path.exists(path):
         try:
@@ -330,10 +322,7 @@ def _ensure_hc_disk_cache() -> Dict[str, Any]:
 def save_hc_disk_cache() -> None:
     """Persist in-memory Health Canada cache to disk if it has changed."""
     global _hc_disk_cache_dirty
-    hc_config = CONFIG.get('health_canada_api', {})
-    disable_cache = hc_config.get('disable_cache', False)
-    
-    if disable_cache or not _hc_disk_cache_dirty or _hc_disk_cache is None:
+    if not _hc_disk_cache_dirty or _hc_disk_cache is None:
         return
 
     path = _hc_cache_file()
@@ -463,6 +452,9 @@ def _hc_approval_year(statuses: List[dict]) -> Optional[str]:
 
 def fetch_health_canada_approval(interventions: List[str]) -> str:
     """Check each intervention against Health Canada database."""
+    if not CONFIG.get('health_canada_api', {}).get('enabled', True):
+        return "N/A"
+        
     if not interventions:
         return "N/A"
 
@@ -795,6 +787,25 @@ def fetch_fda_info(interventions: List[str], current_nct_id: str):
     return status_str, safety_str, preg_contra_str, lact_contra_str, cited_str
 
 
+# ============================================================================
+# TRANSFORM - Functions that transform and process data
+# ============================================================================
+
+def parse_age_in_years(age_str: str) -> Optional[float]:
+    if not age_str or age_str == 'N/A':
+        return None
+    age_str = age_str.lower()
+    match = re.match(r'([\d.]+)\s*(year|month|week|day)', age_str)
+    if match:
+        val = float(match.group(1))
+        unit = match.group(2)
+        if unit == 'year': return val
+        elif unit == 'month': return val / 12.0
+        elif unit == 'week': return val / 52.0
+        elif unit == 'day': return val / 365.0
+    return None
+
+
 def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     if not interventions:
         return "N/A"
@@ -838,24 +849,6 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
         
     return "\n".join(classes_list) if classes_list else "N/A"
 
-
-# ============================================================================
-# TRANSFORM - Functions that transform and process data
-# ============================================================================
-
-def parse_age_in_years(age_str: str) -> Optional[float]:
-    if not age_str or age_str == 'N/A':
-        return None
-    age_str = age_str.lower()
-    match = re.match(r'([\d.]+)\s*(year|month|week|day)', age_str)
-    if match:
-        val = float(match.group(1))
-        unit = match.group(2)
-        if unit == 'year': return val
-        elif unit == 'month': return val / 12.0
-        elif unit == 'week': return val / 52.0
-        elif unit == 'day': return val / 365.0
-    return None
 
 def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     """
@@ -1167,13 +1160,16 @@ def initialize_gemini_models() -> Dict[str, Dict[str, Any]]:
     gemini_api_key = os.getenv(api_key_env, '')
     
     if not gemini_api_key:
-        print(f"❌ {api_key_env} environment variable not set")
-        print(f"   Set it with: export {api_key_env}='your-api-key'")
-        return {}
+        print(f"⚠️  {api_key_env} environment variable not set. Vertex AI client will attempt to use Google Cloud Application Default Credentials (ADC).")
     
     try:
-        vertexai.init(project="project-0b52e79a-4960-471d-9d8", location="us-central1")
-        
+        # Initialize Google GenAI client for Vertex AI
+        client = genai.Client(
+            vertexai=True,
+            project="project-0b52e79a-4960-471d-9d8",
+            location="us-central1"
+        )
+
         model_name = ai_config.get('model', 'gemini-2.5-flash')
         _ACTUAL_GEMINI_MODEL = model_name
         
@@ -1196,13 +1192,12 @@ def initialize_gemini_models() -> Dict[str, Dict[str, Any]]:
                 
             system_instruction = col.get('system_instruction', '')
             
-            col_model = GenerativeModel(
-                model_name=model_name,
-                system_instruction=[system_instruction] if system_instruction else None
-            )
-            
             models[col_name] = {
-                'model': col_model
+                'client': client,
+                'model_name': model_name,
+                'config': types.GenerateContentConfig(
+                    system_instruction=system_instruction
+                )
             }
             print(f"✅ Initialized model for column '{col_name}'")
         
@@ -1220,7 +1215,7 @@ def get_gemini_response(model_ctx: Dict[str, Any], row_prompt: str) -> Optional[
     Get response from Gemini API for a single row.
     
     Args:
-        model_ctx (Dict): Dictionary with model
+        model_ctx (Dict): Dictionary with client, model_name, and config
         row_prompt (str): Row-specific prompt (context already set via system instruction)
         
     Returns:
@@ -1228,8 +1223,12 @@ def get_gemini_response(model_ctx: Dict[str, Any], row_prompt: str) -> Optional[
     """
     try:
         # Generate content using the new SDK
-        model = model_ctx['model']
-        response = model.generate_content(row_prompt)
+        client = model_ctx['client']
+        response = client.models.generate_content(
+            model=model_ctx['model_name'],
+            contents=row_prompt,
+            config=model_ctx['config']
+        )
 
         # Extract text from response
         if response and response.text:
@@ -1298,22 +1297,48 @@ def transform_studies_with_ai(studies: List[Dict[str, Any]]) -> List[Dict[str, A
         
     output_config = CONFIG.get('output', {})
     filename = output_config.get('csv_filename', 'clinical_trials_filtered.csv')
+    json_filename = output_config.get('json_filename')
+    if not json_filename:
+        json_filename = os.path.splitext(filename)[0] + '.json'
+    
+    use_cache = ai_config.get('use_cache', True)
+    cache_file = ai_config.get('cache_file', 'ai_cache.json')
     
     existing_ai_data = {}
-    if os.path.exists(filename):
-        try:
-            with open(filename, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    nct_id = row.get('nct_id')
-                    if nct_id:
-                        # Store all AI columns
-                        ai_vals = {col.get('name'): row.get(col.get('name')) for col in columns if row.get(col.get('name')) and row.get(col.get('name')) != 'N/A'}
-                        if ai_vals:
-                            existing_ai_data[nct_id] = ai_vals
-            print(f"📖 Loaded existing AI data for {len(existing_ai_data)} trials from {filename}")
-        except Exception as e:
-            print(f"⚠️ Could not load existing CSV to resume: {e}")
+    if use_cache:
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, 'r', encoding='utf-8') as f:
+                    existing_ai_data = json.load(f)
+                print(f"📖 Loaded {len(existing_ai_data)} cached AI results from {cache_file}")
+            except Exception as e:
+                print(f"⚠️ Could not load AI cache file {cache_file}: {e}")
+        elif os.path.exists(json_filename):
+            try:
+                with open(json_filename, 'r', encoding='utf-8') as f:
+                    saved_studies = json.load(f)
+                    for study in saved_studies:
+                        nct_id = study.get('nct_id')
+                        if nct_id:
+                            ai_vals = {col.get('name'): study.get(col.get('name')) for col in columns if study.get(col.get('name')) and study.get(col.get('name')) != 'N/A'}
+                            if ai_vals:
+                                existing_ai_data[nct_id] = ai_vals
+                print(f"📖 Loaded existing AI data for {len(existing_ai_data)} trials from {json_filename}")
+            except Exception as e:
+                print(f"⚠️ Could not load existing JSON to resume: {e}")
+        elif os.path.exists(filename):
+            try:
+                with open(filename, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f)
+                    for row in reader:
+                        nct_id = row.get('nct_id')
+                        if nct_id:
+                            ai_vals = {col.get('name'): row.get(col.get('name')) for col in columns if row.get(col.get('name')) and row.get(col.get('name')) != 'N/A'}
+                            if ai_vals:
+                                existing_ai_data[nct_id] = ai_vals
+                print(f"📖 Loaded existing AI data for {len(existing_ai_data)} trials from {filename}")
+            except Exception as e:
+                print(f"⚠️ Could not load existing CSV to resume: {e}")
 
     # Determine which studies to process
     max_new_calls = ai_config.get('max_rows', 250)
@@ -1327,8 +1352,7 @@ def transform_studies_with_ai(studies: List[Dict[str, Any]]) -> List[Dict[str, A
     processed_studies = []
     remaining_studies = []
     new_processed_count = 0
-    quota_exceeded = False
-
+ 
     try:
         for i, study in enumerate(studies):
             nct_id = study.get('nct_id', 'Unknown')
@@ -1339,36 +1363,78 @@ def transform_studies_with_ai(studies: List[Dict[str, Any]]) -> List[Dict[str, A
                     study[col_name] = val
                 processed_studies.append(study)
                 continue
+
+            # Skip AI for non-applicable studies (e.g., male-only or wrong age range)
+            if str(study.get('applicable', 'TRUE')).upper() == 'FALSE':
+                for col in columns:
+                    col_name = col.get('name')
+                    if col_name not in study:
+                        study[col_name] = 'N/A'
+                processed_studies.append(study)
+                continue
                 
-            if new_processed_count >= max_new_calls or quota_exceeded:
+            if new_processed_count >= max_new_calls:
                 remaining_studies.append(study)
                 continue
                 
             print(f"  [{new_processed_count+1}/{max_new_calls} new] Processing {nct_id}...", end=' ', flush=True)
             
+            study_ai_vals = {}
             for col in columns:
                 col_name = col.get('name')
                 model = models[col_name]
                 ai_value = process_study_with_ai(model, study)
+ 
+                # If we get None, then backoff and retry before we skip this one and move to the
+                # next one.
+                if ai_value is None:
+                    print("Retrying AI call")
+                    api_delay = ai_config.get('api_delay', 0.5)
+                    if api_delay > 0:
+                        time.sleep(2*api_delay)
+                    ai_value = process_study_with_ai(model, study)
                 
                 if ai_value is None:
                     # Assumes None means API error/timeout/quota
-                    print("⚠️ Quota Exceeded or API Error! Stopping AI processing.")
-                    quota_exceeded = True
+                    print("⚠️ Quota Exceeded or API Error! Omitting AI processing.")
                     study[col_name] = "N/A"
+                    study_ai_vals[col_name] = "N/A"
                 else:
+                    print(f"\n\t{col_name} - ✓")
                     study[col_name] = ai_value
+                    study_ai_vals[col_name] = ai_value
             
-            if not quota_exceeded:
-                print("✓")
-            
+            if study_ai_vals:
+                existing_ai_data[nct_id] = study_ai_vals
+                
             processed_studies.append(study)
             new_processed_count += 1
             
     except KeyboardInterrupt:
-        print(f"\n⚠️ User interrupted! Saving {len(processed_studies)} processed studies so far...")
+        print(f"\n⚠️ User interrupted! Saving {len(processed_studies)} processed studies so far to JSON...")
         # Move remaining to remaining_studies
         remaining_studies.extend(studies[len(processed_studies) + len(remaining_studies):])
+        
+        # Add remaining studies to processed_studies list as unprocessed ('N/A')
+        for study in remaining_studies:
+            for col in columns:
+                col_name = col.get('name')
+                if col_name not in study:
+                    study[col_name] = 'N/A'
+            processed_studies.append(study)
+            
+        save_to_json(processed_studies, json_filename)
+        
+        if use_cache:
+            try:
+                with open(cache_file, 'w', encoding='utf-8') as f:
+                    json.dump(existing_ai_data, f, indent=2, ensure_ascii=False)
+                print(f"💾 Updated AI cache saved to {cache_file}")
+            except Exception as e:
+                print(f"❌ Failed to save AI cache: {e}")
+                
+        print("💾 In-progress progress saved. Terminating pipeline.")
+        sys.exit(0)
     
     # Add remaining studies without AI transformation
     for study in remaining_studies:
@@ -1379,10 +1445,18 @@ def transform_studies_with_ai(studies: List[Dict[str, Any]]) -> List[Dict[str, A
         processed_studies.append(study)
     
     print(f"\n✅ AI transformation complete:")
-    print(f"   Resumed from CSV: {len(processed_studies) - len(remaining_studies) - new_processed_count} studies")
+    print(f"   Resumed from cache: {len(processed_studies) - len(remaining_studies) - new_processed_count} studies")
     print(f"   New Processed with AI: {new_processed_count} studies")
     if remaining_studies:
         print(f"   Remaining {len(remaining_studies)} studies set to 'N/A'")
+        
+    if use_cache:
+        try:
+            with open(cache_file, 'w', encoding='utf-8') as f:
+                json.dump(existing_ai_data, f, indent=2, ensure_ascii=False)
+            print(f"💾 Updated AI cache saved to {cache_file}")
+        except Exception as e:
+            print(f"❌ Failed to save AI cache: {e}")
     
     return processed_studies
 
@@ -1392,6 +1466,25 @@ def transform_studies_with_ai(studies: List[Dict[str, Any]]) -> List[Dict[str, A
 # ============================================================================
 # LOAD - Functions that save data to output destinations
 # ============================================================================
+
+def save_to_json(studies: List[Dict[str, Any]], filename: str) -> None:
+    """
+    Save studies list to a JSON file.
+    
+    Args:
+        studies (List[Dict[str, Any]]): List of study data dictionaries
+        filename (str): Target JSON filename
+    """
+    if not studies:
+        print("No studies to save to JSON")
+        return
+    try:
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(studies, f, indent=2, ensure_ascii=False)
+        print(f"💾 Data saved to JSON: {filename} ({len(studies)} rows)")
+    except Exception as e:
+        print(f"❌ Failed to save JSON: {e}")
+
 
 def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -> None:
     """
@@ -1483,36 +1576,51 @@ def main():
     resume_from_csv = CONFIG.get('ctgov', {}).get('resume_from_csv', False)
     output_config = CONFIG.get('output', {})
     filename = output_config.get('csv_filename', 'clinical_trials_filtered.csv')
+    json_filename = output_config.get('json_filename')
+    if not json_filename:
+        json_filename = os.path.splitext(filename)[0] + '.json'
     
     transformed_studies = []
     
-    if resume_from_csv and os.path.exists(filename):
-        print(f"\n📂 Resuming entirely from existing CSV: {filename}")
-        try:
-            with open(filename, 'r', encoding='utf-8-sig') as f:
-                reader = csv.DictReader(f)
-                transformed_studies = [row for row in reader]
-            print(f"📊 Loaded {len(transformed_studies)} studies directly from CSV")
-            
-            # Backfill missing OpenFDA Pharmacologic Class
-            print("🔄 Checking for missing OpenFDA Pharmacologic Class...")
-            for study in transformed_studies:
-                if not study.get('OpenFDA Pharmacologic Class (EPC)'):
-                    intv_str = study.get('intervention_names', '')
-                    if intv_str and intv_str != 'N/A':
-                        intv_list = [i.strip() for i in intv_str.split(',')]
-                        study['OpenFDA Pharmacologic Class (EPC)'] = fetch_openfda_pharm_class(intv_list)
-                    else:
-                        study['OpenFDA Pharmacologic Class (EPC)'] = 'N/A'
-                        
-        except Exception as e:
-            print(f"❌ Failed to load CSV: {e}")
+    if resume_from_csv:
+        if os.path.exists(json_filename):
+            print(f"\n📂 Resuming entirely from existing JSON: {json_filename}")
+            try:
+                with open(json_filename, 'r', encoding='utf-8') as f:
+                    transformed_studies = json.load(f)
+                print(f"📊 Loaded {len(transformed_studies)} studies directly from JSON")
+            except Exception as e:
+                print(f"❌ Failed to load JSON: {e}")
+                sys.exit(1)
+        elif os.path.exists(filename):
+            print(f"\n📂 Resuming entirely from existing CSV: {filename}")
+            try:
+                with open(filename, 'r', encoding='utf-8-sig') as f:
+                    reader = csv.DictReader(f)
+                    transformed_studies = [row for row in reader]
+                print(f"📊 Loaded {len(transformed_studies)} studies directly from CSV")
+            except Exception as e:
+                print(f"❌ Failed to load CSV: {e}")
+                sys.exit(1)
+        else:
+            print(f"❌ Resume enabled, but neither JSON nor CSV file exists: {json_filename} / {filename}")
             sys.exit(1)
             
         # Apply row limits if needed
         ai_config = CONFIG.get('ai_processing', {})
         if ai_config.get('max_rows') is not None:
             transformed_studies = transformed_studies[:ai_config.get('max_rows')]
+        
+        # Backfill missing OpenFDA Pharmacologic Class
+        print("🔄 Checking for missing OpenFDA Pharmacologic Class...")
+        for study in transformed_studies:
+            if not study.get('OpenFDA Pharmacologic Class (EPC)'):
+                intv_str = study.get('intervention_names', '')
+                if intv_str and intv_str != 'N/A':
+                    intv_list = [i.strip() for i in intv_str.split(',')]
+                    study['OpenFDA Pharmacologic Class (EPC)'] = fetch_openfda_pharm_class(intv_list)
+                else:
+                    study['OpenFDA Pharmacologic Class (EPC)'] = 'N/A'
             
     else:
         # EXTRACT: Fetch all studies from API
@@ -1548,8 +1656,9 @@ def main():
     # TRANSFORM: Apply AI transformation
     transformed_studies = transform_studies_with_ai(transformed_studies)
     
-    # LOAD: Save transformed studies to CSV
-    load_to_csv(transformed_studies)
+    # LOAD: Save transformed studies to both JSON and CSV
+    save_to_json(transformed_studies, json_filename)
+    load_to_csv(transformed_studies, filename)
     
     print(f"\n✅ Successfully processed {len(transformed_studies)} studies")
 
