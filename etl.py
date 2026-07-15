@@ -15,7 +15,7 @@ import sys
 import os
 import time
 import argparse
-from typing import Dict, Any, Optional, List
+from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
 from urllib.parse import urlencode
 import urllib.parse
@@ -850,6 +850,238 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     return "\n".join(classes_list) if classes_list else "N/A"
 
 
+# ============================================================================
+# ICD-11 API
+# ============================================================================
+
+_icd_token: Optional[str] = None
+_icd_token_expiry: float = 0.0
+_icd_disk_cache: Optional[Dict[str, Any]] = None
+_icd_disk_cache_dirty = False
+
+
+def _icd_cache_file() -> str:
+    return CONFIG.get('icd_api', {}).get('cache_file', 'icd_cache.yaml')
+
+
+def _ensure_icd_disk_cache() -> Dict[str, Any]:
+    global _icd_disk_cache
+    if _icd_disk_cache is not None:
+        return _icd_disk_cache
+
+    path = _icd_cache_file()
+    if os.path.exists(path):
+        try:
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = yaml.safe_load(f)
+            _icd_disk_cache = loaded if isinstance(loaded, dict) else {}
+            print(f"✅ Loaded ICD cache from {path} ({len(_icd_disk_cache)} entries)")
+        except Exception as e:
+            print(f"⚠️ Could not load ICD cache ({path}): {e}")
+            _icd_disk_cache = {}
+    else:
+        _icd_disk_cache = {}
+    return _icd_disk_cache
+
+
+def save_icd_disk_cache() -> None:
+    """Persist ICD cache to disk if it has been modified."""
+    global _icd_disk_cache_dirty
+    if not _icd_disk_cache_dirty or _icd_disk_cache is None:
+        return
+    path = _icd_cache_file()
+    try:
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(_icd_disk_cache, f, default_flow_style=False,
+                           sort_keys=True, allow_unicode=True)
+        _icd_disk_cache_dirty = False
+        print(f"💾 Saved ICD cache to {path}")
+    except Exception as e:
+        print(f"⚠️ Failed to save ICD cache ({path}): {e}")
+
+
+atexit.register(save_icd_disk_cache)
+
+
+def _get_icd_token() -> Optional[str]:
+    """Fetch (or reuse a cached) OAuth2 bearer token for the ICD-11 API."""
+    global _icd_token, _icd_token_expiry
+
+    if _icd_token and time.time() < _icd_token_expiry - 60:
+        return _icd_token
+
+    icd_config = CONFIG.get('icd_api', {})
+    # Prefer env vars, fall back to inline config values
+    client_id = os.getenv(icd_config.get('client_id_env', ''), '') or icd_config.get('client_id', '')
+    client_secret = os.getenv(icd_config.get('client_secret_env', ''), '') or icd_config.get('client_secret', '')
+
+    if not client_id or not client_secret:
+        print("⚠️ ICD API credentials not configured (client_id / client_secret missing)")
+        return None
+
+    try:
+        r = requests.post(
+            "https://icdaccessmanagement.who.int/connect/token",
+            data={
+                'client_id': client_id,
+                'client_secret': client_secret,
+                'scope': 'icdapi_access',
+                'grant_type': 'client_credentials',
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            _icd_token = data.get('access_token')
+            expires_in = data.get('expires_in', 3600)
+            _icd_token_expiry = time.time() + expires_in
+            return _icd_token
+        else:
+            print(f"⚠️ ICD token request failed: {r.status_code} {r.text[:200]}")
+    except Exception as e:
+        print(f"⚠️ ICD token request error: {e}")
+    return None
+
+
+def _search_icd_condition(condition: str) -> Optional[Dict[str, str]]:
+    """Search ICD-11 MMS for a condition string.
+    
+    Returns a dict {'code': str, 'title': str} for the best match, or None.
+    Cache stores these dicts (or None for not-found). Old string-format
+    cache entries are treated as misses so they get re-fetched.
+    """
+    global _icd_disk_cache_dirty
+
+    cache = _ensure_icd_disk_cache()
+    cache_key = condition.lower().strip()
+    if cache_key in cache:
+        val = cache[cache_key]
+        # Treat old string-format entries as misses so they get re-fetched
+        if val is None or isinstance(val, dict):
+            return val
+
+    token = _get_icd_token()
+    if not token:
+        return None
+
+    icd_config = CONFIG.get('icd_api', {})
+    release_id = icd_config.get('release_id', '2024-01')
+    url = f"https://id.who.int/icd/release/11/{release_id}/mms/search"
+
+    try:
+        r = requests.get(
+            url,
+            params={'q': condition, 'useFlexisearch': 'true', 'flatResults': 'true'},
+            headers={
+                'Authorization': f'Bearer {token}',
+                'Accept': 'application/json',
+                'API-Version': 'v2',
+                'Accept-Language': 'en',
+            },
+            timeout=10,
+        )
+        if r.status_code == 200:
+            data = r.json()
+            entities = data.get('destinationEntities', [])
+            if entities:
+                # Use the top match
+                best = entities[0]
+                title = re.sub(r'<[^>]+>', '', best.get('title', '')).strip()
+                code = best.get('theCode', '')
+                result = {'code': code, 'title': title} if code else None
+            else:
+                result = None
+            cache[cache_key] = result
+            _icd_disk_cache_dirty = True
+            return result
+        elif r.status_code == 401:
+            global _icd_token
+            _icd_token = None
+    except Exception as e:
+        print(f"⚠️ ICD search error for '{condition}': {e}")
+    return None
+
+
+# ICD-11 chapter lookup by first character of the code
+_ICD11_CHAPTERS: Dict[str, str] = {
+    '1': 'Certain infectious or parasitic diseases',
+    '2': 'Neoplasms',
+    '3': 'Diseases of the blood or blood-forming organs',
+    '4': 'Diseases of the immune system',
+    '5': 'Endocrine, nutritional or metabolic diseases',
+    '6': 'Mental, behavioural or neurodevelopmental disorders',
+    '7': 'Sleep-wake disorders',
+    '8': 'Diseases of the nervous system',
+    '9': 'Diseases of the visual system',
+    'A': 'Diseases of the ear or mastoid process',
+    'B': 'Diseases of the circulatory system',
+    'C': 'Diseases of the respiratory system',
+    'D': 'Diseases of the digestive system',
+    'E': 'Diseases of the skin',
+    'F': 'Diseases of the musculoskeletal system or connective tissue',
+    'G': 'Diseases of the genitourinary system',
+    'H': 'Conditions related to sexual health',
+    'J': 'Pregnancy, childbirth or the puerperium',
+    'K': 'Certain conditions originating in the perinatal period',
+    'L': 'Developmental anomalies',
+    'M': 'Symptoms, signs or clinical findings, not elsewhere classified',
+    'N': 'Injury, poisoning or certain other consequences of external causes',
+    'P': 'External causes of morbidity or mortality',
+    'Q': 'Factors influencing health status or contact with health services',
+    'R': 'Codes for special purposes',
+    'S': 'Supplementary chapter - Traditional Medicine',
+}
+
+
+def _icd_chapter_from_code(code: str) -> str:
+    """Return the ICD-11 chapter name from the first character of a code."""
+    if not code:
+        return 'Unknown'
+    return _ICD11_CHAPTERS.get(code[0].upper(), 'Unknown')
+
+
+def fetch_icd_codes(conditions: List[str]) -> Tuple[str, str, str]:
+    """Look up ICD-11 codes for a list of condition strings.
+    
+    Returns a 3-tuple:
+      - primary_code:    ICD-11 code for the first/primary condition (e.g. '5A11')
+      - icd_category:    Top-level chapter for the primary condition
+                         (e.g. 'Endocrine, nutritional or metabolic diseases')
+      - secondary_codes: Pipe-separated codes for any additional conditions
+                         (e.g. 'Hypertension: BA00 | Type 1 Diabetes: 5A10')
+    """
+    na = ("N/A", "N/A", "N/A")
+    if not CONFIG.get('icd_api', {}).get('enabled', False):
+        return na
+
+    valid = [c for c in conditions if c and c != 'N/A']
+    if not valid:
+        return na
+
+    primary_code = "N/A"
+    icd_category = "N/A"
+    secondary_parts = []
+
+    for i, condition in enumerate(valid):
+        match = _search_icd_condition(condition)
+        if i == 0:
+            if match:
+                primary_code = match['code']
+                icd_category = _icd_chapter_from_code(match['code'])
+            else:
+                primary_code = 'Not found'
+                icd_category = 'Unknown'
+        else:
+            if match:
+                secondary_parts.append(f"{condition}: {match['code']}")
+            else:
+                secondary_parts.append(f"{condition}: Not found")
+
+    secondary_codes = " | ".join(secondary_parts) if secondary_parts else "N/A"
+    return primary_code, icd_category, secondary_codes
+
+
+
 def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     """
     Transform raw study data into structured format for CSV output.
@@ -1019,6 +1251,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     health_canada_approval_str = fetch_health_canada_approval(intervention_names)
     fda_status_str, fda_safety_str, preg_contra_str, lact_contra_str, cited_str = fetch_fda_info(intervention_names, nct_id)
     openfda_pharm_class_str = fetch_openfda_pharm_class(intervention_names)
+    icd_primary_code, icd_category, icd_secondary_codes = fetch_icd_codes(conditions)
     
     # Calculate Consistency
     consistency_str = "N/A"
@@ -1124,6 +1357,9 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'FDA Lactation Status': lact_contra_str,
         'Cited in FDA Label': cited_str,
         'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_str,
+        'ICD-11 Primary Code': icd_primary_code,
+        'ICD-11 Category': icd_category,
+        'ICD-11 Secondary Codes': icd_secondary_codes,
         'Approval Consistency': consistency_str,
         'intervention_types': intervention_types_str,
         'intervention_names': intervention_names_str,
@@ -1515,7 +1751,8 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'allocation', 'intervention_model', 'primary_purpose', 'masking', 'arm_groups',
         'funder_info', 'lead_sponsor', 'lead_sponsor_class', 'collaborators',
         'Health Canada Approval', 'FDA Approved Status', 'Approval Consistency', 'FDA Pregnancy & Lactation Safety',
-        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)'
+        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)',
+        'ICD-11 Primary Code', 'ICD-11 Category', 'ICD-11 Secondary Codes'
     ]
     
     # Add all AI columns from config

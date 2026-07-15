@@ -25,7 +25,7 @@ dailymed_api:
   spl_url: https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json
 
 icd_api:
-  enabled: FALSE
+  enabled: TRUE
   client_id: "68b62934-c265-42ed-af5d-4c6545df7742_7f4a1ef1-4300-4e69-aa96-9e46fc853c1a"
   client_secret: "X0WyxX9vpNGJwJADFDphr0fTvgz4tM6RU3WBijY04mA="
   client_id_env: ICD_CLIENT_ID
@@ -41,7 +41,7 @@ ai_processing:
   # --- AI LIMIT ---
   # Change max_rows to run the AI only on the first N records (e.g., 2000)
   max_rows: 9000
-  debug_only_tuning_trials: FALSE
+  debug_only_tuning_trials: TRUE
   use_cache: TRUE
   cache_file: ai_cache.json
   row_prompt_template: |
@@ -191,7 +191,7 @@ ai_processing:
         
 
 output:
-  csv_filename: test_june7.csv
+  csv_filename: test_july13.csv
   max_rows_per_file: 9000
 
 tuning_trials:
