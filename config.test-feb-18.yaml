@@ -41,7 +41,7 @@ ai_processing:
   # --- AI LIMIT ---
   # Change max_rows to run the AI only on the first N records (e.g., 2000)
   max_rows: 9000
-  debug_only_tuning_trials: TRUE
+  debug_only_tuning_trials: FALSE
   use_cache: TRUE
   cache_file: ai_cache.json
   row_prompt_template: |
@@ -221,7 +221,30 @@ tuning_trials:
   - NCT05731960
   - NCT04940078
   - NCT02429791
-  - 
+  - NCT01630538
+  - NCT01844986
+  - NCT01889173
+  - NCT02154763
+  - NCT01847274
+  - NCT01885078
+  - NCT01897532
+  - NCT01909453
+  - NCT02776536
+  - NCT01920061
+  - NCT01920711
+  - NCT03692805
+  - NCT01926782
+  - NCT04080111
+  - NCT04267158
+  - NCT04346917
+  - NCT04665048
+  - NCT05192659
+  - NCT05786980
+  - NCT06454231
+  - NCT07098887
+  - NCT01731444
+  - NCT01782755
+
 
 
 

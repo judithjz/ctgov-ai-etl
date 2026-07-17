@@ -1181,15 +1181,32 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     unique_countries = sorted(list(set(loc.get('country', 'N/A') for loc in locations if 'country' in loc)))
     location_str = ', '.join(unique_countries) if unique_countries else 'N/A'
     
-    # Detailed sites for AI counting
+    # Detailed sites — one entry per location
     sites_list = []
+    city_counts: Dict[str, int] = {}
+    province_counts: Dict[str, int] = {}
+
     for loc in locations:
         facility = loc.get('facility', 'Unknown Facility')
-        country = loc.get('country', 'Unknown Country')
-        sites_list.append(f"• {facility} ({country})")
-    sites_detail_str = '\n'.join(sites_list) if sites_list else 'N/A'
-    
-    sites_detail_str = '\n'.join(sites_list) if sites_list else 'N/A'
+        city     = loc.get('city', '')
+        state    = loc.get('state', '')   # province in Canada
+        country  = loc.get('country', 'Unknown Country')
+
+        detail_parts = [facility]
+        if city:    detail_parts.append(city)
+        if state:   detail_parts.append(state)
+        if country: detail_parts.append(f"({country})")
+        sites_list.append(', '.join(detail_parts))
+
+        city_key = city if city else 'Unknown'
+        city_counts[city_key] = city_counts.get(city_key, 0) + 1
+
+        province_key = state if state else 'Unknown'
+        province_counts[province_key] = province_counts.get(province_key, 0) + 1
+
+    sites_detail_str    = '; '.join(sites_list) if sites_list else 'N/A'
+    sites_cities_str    = '; '.join(f"{c} ({n})" for c, n in city_counts.items()) if city_counts else 'N/A'
+    sites_provinces_str = '; '.join(f"{p} ({n})" for p, n in province_counts.items()) if province_counts else 'N/A'
     
     # New Columns
     site_count_type = "Multi-site" if len(locations) > 1 else ("Single-site" if len(locations) == 1 else "Unknown/None")
@@ -1343,6 +1360,8 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'location': location_str,
         'countries_str': location_str,
         'sites_detail': sites_detail_str,
+        'sites_cities': sites_cities_str,
+        'sites_provinces': sites_provinces_str,
         'site_count_type': site_count_type,
         'has_canadian_site': has_canadian_site,
         'phase': phase_str,
@@ -1744,7 +1763,7 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'minimum_age', 'maximum_age', 'Applicable', 'study_type', 'start_date',
         'primary_completion_date', 'completion_date', 'first_posted_date', 'last_update_date',
         'gender', 'healthy_volunteers', 'brief_summary', 'detailed_description', 'criteria',
-        'start_year', 'location', 'sites_detail', 'site_count_type', 'has_canadian_site', 'phase', 'enrollment', 'results_link',
+        'start_year', 'location', 'sites_detail', 'sites_cities', 'sites_provinces', 'site_count_type', 'has_canadian_site', 'phase', 'enrollment', 'results_link',
         'publications', 'pubmed_publications',
         'intervention_types', 'intervention_names', 'intervention_descriptions',
         'primary_outcomes', 'secondary_outcomes',
