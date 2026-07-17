@@ -24,6 +24,9 @@ health_canada_api:
 dailymed_api:
   spl_url: https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json
 
+openfda_api:
+  api_key: "s7S1vYs4wNsBWwE6Q6Hi2l579tgrs5SppoNbICGG"
+
 icd_api:
   enabled: TRUE
   client_id: "68b62934-c265-42ed-af5d-4c6545df7742_7f4a1ef1-4300-4e69-aa96-9e46fc853c1a"

@@ -806,6 +806,8 @@ def parse_age_in_years(age_str: str) -> Optional[float]:
     return None
 
 
+_openfda_epc_cache = {}
+
 def _query_openfda_epc(query: str) -> Optional[List[str]]:
     """
     Query openFDA for Established Pharmacologic Class (EPC) for a drug name.
@@ -819,37 +821,55 @@ def _query_openfda_epc(query: str) -> Optional[List[str]]:
     false matches).
     """
     q_upper = query.upper()
+    if q_upper in _openfda_epc_cache:
+        return _openfda_epc_cache[q_upper]
 
     strategies = [
-        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"",
-        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"",
-        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"",
+        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"+AND+_exists_:openfda.pharm_class_epc",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"+AND+_exists_:openfda.pharm_class_epc",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"+AND+_exists_:openfda.pharm_class_epc",
     ]
 
+    api_key = CONFIG.get('openfda_api', {}).get('api_key', '') or os.getenv('OPENFDA_API_KEY', '')
+    api_key_param = f"&api_key={api_key}" if api_key else ""
+
     for strategy in strategies:
-        url = f"https://api.fda.gov/drug/label.json?search={strategy}&limit=5"
-        try:
-            r = requests.get(url, timeout=6)
-            if r.status_code != 200:
-                continue
-            results = r.json().get('results', [])
+        url = f"https://api.fda.gov/drug/label.json?search={strategy}&limit=5{api_key_param}"
+        retries = 3
+        while retries > 0:
+            try:
+                r = requests.get(url, timeout=6)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    retries -= 1
+                    continue
+                if r.status_code != 200:
+                    break
+                
+                results = r.json().get('results', [])
 
-            # First pass: prefer a result where queried substance appears and has EPC
-            for res in results:
-                openfda = res.get('openfda', {})
-                substances = [s.upper() for s in openfda.get('substance_name', [])]
-                epc = openfda.get('pharm_class_epc', [])
-                if epc and any(q_upper in s for s in substances):
-                    return epc
+                # First pass: prefer a result where queried substance appears and has EPC
+                for res in results:
+                    openfda = res.get('openfda', {})
+                    substances = [s.upper() for s in openfda.get('substance_name', [])]
+                    epc = openfda.get('pharm_class_epc', [])
+                    if epc and any(q_upper in s for s in substances):
+                        _openfda_epc_cache[q_upper] = epc
+                        return epc
 
-            # Second pass: any result with EPC (relaxed match)
-            for res in results:
-                epc = res.get('openfda', {}).get('pharm_class_epc', [])
-                if epc:
-                    return epc
+                # Second pass: any result with EPC (relaxed match)
+                for res in results:
+                    epc = res.get('openfda', {}).get('pharm_class_epc', [])
+                    if epc:
+                        _openfda_epc_cache[q_upper] = epc
+                        return epc
+                
+                break # 200 OK but no EPC found, stop retrying this strategy
 
-        except Exception:
-            pass
+            except Exception:
+                break
+                
+    _openfda_epc_cache[q_upper] = None
     return None
 
 
