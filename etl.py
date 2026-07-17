@@ -897,14 +897,14 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
                 
                 epc = _query_openfda_epc(query)
                 if epc:
-                    classes_list.append(f"[{clean_name.upper()}]: {', '.join(epc)}")
+                    classes_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
                     found_epc = True
                     break
             if found_epc:
                 break
                 
         if not found_epc:
-            classes_list.append(f"[{clean_name.upper()}]: N/A")
+            classes_list.append(f"N/A [{clean_name.upper()}]")
         
     return "\n".join(classes_list) if classes_list else "N/A"
 
