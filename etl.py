@@ -763,21 +763,21 @@ def fetch_fda_info(interventions: List[str], current_nct_id: str):
         
         data = fetch_fda_label(clean_name)
         if data:
-            status_list.append(f"APPROVED - {clean_name} ({data['application_number']})")
+            status_list.append(f"APPROVED ({data['application_number']}) [{clean_name.upper()}]")
             preg_text = data['pregnancy'] or "No specific pregnancy section found."
             lact_text = data['lactation'] or "No specific lactation section found."
-            safety_list.append(f"[{clean_name.upper()}]\nPregnancy: {preg_text}\nLactation: {lact_text}")
-            preg_contra_list.append(f"[{clean_name.upper()}]: {data['preg_status']}")
-            lact_contra_list.append(f"[{clean_name.upper()}]: {data['lact_status']}")
+            safety_list.append(f"Pregnancy: {preg_text}\nLactation: {lact_text}\n[{clean_name.upper()}]")
+            preg_contra_list.append(f"{data['preg_status']} [{clean_name.upper()}]")
+            lact_contra_list.append(f"{data['lact_status']} [{clean_name.upper()}]")
             
             cited = "True" if current_nct_id.upper() in data.get('nct_ids', set()) else "False"
-            cited_list.append(f"[{clean_name.upper()}]: {cited}")
+            cited_list.append(f"{cited} [{clean_name.upper()}]")
         else:
-            status_list.append(f"NOT APPROVED - {clean_name} (Not found in DailyMed/FDA)")
-            safety_list.append(f"[{clean_name.upper()}]\nFDA Safety: N/A")
-            preg_contra_list.append(f"[{clean_name.upper()}]: N/A")
-            lact_contra_list.append(f"[{clean_name.upper()}]: N/A")
-            cited_list.append(f"[{clean_name.upper()}]: N/A")
+            status_list.append(f"NOT APPROVED (Not found in DailyMed/FDA) [{clean_name.upper()}]")
+            safety_list.append(f"FDA Safety: N/A\n[{clean_name.upper()}]")
+            preg_contra_list.append(f"N/A [{clean_name.upper()}]")
+            lact_contra_list.append(f"N/A [{clean_name.upper()}]")
+            cited_list.append(f"N/A [{clean_name.upper()}]")
             
     status_str = "\n".join(status_list) if status_list else "N/A"
     safety_str = "\n\n".join(safety_list) if safety_list else "N/A"
