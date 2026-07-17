@@ -806,6 +806,53 @@ def parse_age_in_years(age_str: str) -> Optional[float]:
     return None
 
 
+def _query_openfda_epc(query: str) -> Optional[List[str]]:
+    """
+    Query openFDA for Established Pharmacologic Class (EPC) for a drug name.
+    
+    Tries three search strategies in order:
+      1. openfda.substance_name (uppercase, most precise)
+      2. openfda.generic_name
+      3. openfda.brand_name
+    For each strategy, scans up to 5 results and prefers a hit where the
+    queried name appears in the substance_name (to avoid combination-drug
+    false matches).
+    """
+    q_upper = query.upper()
+
+    strategies = [
+        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"",
+    ]
+
+    for strategy in strategies:
+        url = f"https://api.fda.gov/drug/label.json?search={strategy}&limit=5"
+        try:
+            r = requests.get(url, timeout=6)
+            if r.status_code != 200:
+                continue
+            results = r.json().get('results', [])
+
+            # First pass: prefer a result where queried substance appears and has EPC
+            for res in results:
+                openfda = res.get('openfda', {})
+                substances = [s.upper() for s in openfda.get('substance_name', [])]
+                epc = openfda.get('pharm_class_epc', [])
+                if epc and any(q_upper in s for s in substances):
+                    return epc
+
+            # Second pass: any result with EPC (relaxed match)
+            for res in results:
+                epc = res.get('openfda', {}).get('pharm_class_epc', [])
+                if epc:
+                    return epc
+
+        except Exception:
+            pass
+    return None
+
+
 def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     if not interventions:
         return "N/A"
@@ -822,25 +869,17 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
         clean_words = [w for w in words if w not in stop_words]
         
         found_epc = False
+        # Try progressively shorter word sequences (longest first)
         for length in range(len(clean_words), 0, -1):
             for start in range(len(clean_words) - length + 1):
                 query = " ".join(clean_words[start:start+length])
                 if len(query) < 4 and length < len(clean_words): continue
                 
-                search_url = f"https://api.fda.gov/drug/label.json?search=openfda.generic_name:\"{urllib.parse.quote(query)}\"+OR+openfda.brand_name:\"{urllib.parse.quote(query)}\"&limit=1"
-                try:
-                    r = requests.get(search_url, timeout=5)
-                    if r.status_code == 200:
-                        data = r.json()
-                        results = data.get('results', [])
-                        if results and 'openfda' in results[0]:
-                            epc = results[0]['openfda'].get('pharm_class_epc', [])
-                            if epc:
-                                classes_list.append(f"[{clean_name.upper()}]: {', '.join(epc)}")
-                                found_epc = True
-                                break
-                except Exception:
-                    pass
+                epc = _query_openfda_epc(query)
+                if epc:
+                    classes_list.append(f"[{clean_name.upper()}]: {', '.join(epc)}")
+                    found_epc = True
+                    break
             if found_epc:
                 break
                 
@@ -848,6 +887,7 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
             classes_list.append(f"[{clean_name.upper()}]: N/A")
         
     return "\n".join(classes_list) if classes_list else "N/A"
+
 
 
 # ============================================================================
@@ -946,7 +986,7 @@ def _get_icd_token() -> Optional[str]:
 def _search_icd_condition(condition: str) -> Optional[Dict[str, str]]:
     """Search ICD-11 MMS for a condition string.
     
-    Returns a dict {'code': str, 'title': str} for the best match, or None.
+    Returns a dict {'code': str, 'title': str, 'block': str} for the best match, or None.
     Cache stores these dicts (or None for not-found). Old string-format
     cache entries are treated as misses so they get re-fetched.
     """
@@ -958,7 +998,9 @@ def _search_icd_condition(condition: str) -> Optional[Dict[str, str]]:
         val = cache[cache_key]
         # Treat old string-format entries as misses so they get re-fetched
         if val is None or isinstance(val, dict):
-            return val
+            # If the cached dictionary doesn't have 'block', treat as miss to force re-fetch
+            if val is None or 'block' in val:
+                return val
 
     token = _get_icd_token()
     if not token:
@@ -968,16 +1010,18 @@ def _search_icd_condition(condition: str) -> Optional[Dict[str, str]]:
     release_id = icd_config.get('release_id', '2024-01')
     url = f"https://id.who.int/icd/release/11/{release_id}/mms/search"
 
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Accept': 'application/json',
+        'API-Version': 'v2',
+        'Accept-Language': 'en',
+    }
+
     try:
         r = requests.get(
             url,
             params={'q': condition, 'useFlexisearch': 'true', 'flatResults': 'true'},
-            headers={
-                'Authorization': f'Bearer {token}',
-                'Accept': 'application/json',
-                'API-Version': 'v2',
-                'Accept-Language': 'en',
-            },
+            headers=headers,
             timeout=10,
         )
         if r.status_code == 200:
@@ -988,7 +1032,28 @@ def _search_icd_condition(condition: str) -> Optional[Dict[str, str]]:
                 best = entities[0]
                 title = re.sub(r'<[^>]+>', '', best.get('title', '')).strip()
                 code = best.get('theCode', '')
-                result = {'code': code, 'title': title} if code else None
+                
+                block_title = 'Unknown'
+                entity_id = best.get('id')
+                if entity_id and code:
+                    try:
+                        r2 = requests.get(entity_id, headers=headers, timeout=5)
+                        if r2.status_code == 200:
+                            data2 = r2.json()
+                            parent_urls = data2.get('parent', [])
+                            if parent_urls:
+                                r3 = requests.get(parent_urls[0], headers=headers, timeout=5)
+                                if r3.status_code == 200:
+                                    parent_data = r3.json()
+                                    ptitle = parent_data.get('title', {})
+                                    if isinstance(ptitle, dict):
+                                        block_title = ptitle.get('@value', 'Unknown')
+                                    else:
+                                        block_title = str(ptitle)
+                    except Exception as e:
+                        print(f"⚠️ ICD block lookup error for '{condition}': {e}")
+                        
+                result = {'code': code, 'title': title, 'block': block_title} if code else None
             else:
                 result = None
             cache[cache_key] = result
@@ -1040,17 +1105,19 @@ def _icd_chapter_from_code(code: str) -> str:
     return _ICD11_CHAPTERS.get(code[0].upper(), 'Unknown')
 
 
-def fetch_icd_codes(conditions: List[str]) -> Tuple[str, str, str]:
+def fetch_icd_codes(conditions: List[str]) -> Tuple[str, str, str, str, str]:
     """Look up ICD-11 codes for a list of condition strings.
     
-    Returns a 3-tuple:
+    Returns a 5-tuple:
       - primary_code:    ICD-11 code for the first/primary condition (e.g. '5A11')
+      - primary_title:   ICD-11 title for the primary condition
+      - icd_block:       ICD-11 block for the primary condition
       - icd_category:    Top-level chapter for the primary condition
                          (e.g. 'Endocrine, nutritional or metabolic diseases')
       - secondary_codes: Pipe-separated codes for any additional conditions
-                         (e.g. 'Hypertension: BA00 | Type 1 Diabetes: 5A10')
+                         (e.g. 'Hypertension: Essential (primary) hypertension (BA00) | ...')
     """
-    na = ("N/A", "N/A", "N/A")
+    na = ("N/A", "N/A", "N/A", "N/A", "N/A")
     if not CONFIG.get('icd_api', {}).get('enabled', False):
         return na
 
@@ -1059,6 +1126,8 @@ def fetch_icd_codes(conditions: List[str]) -> Tuple[str, str, str]:
         return na
 
     primary_code = "N/A"
+    primary_title = "N/A"
+    icd_block = "N/A"
     icd_category = "N/A"
     secondary_parts = []
 
@@ -1067,18 +1136,22 @@ def fetch_icd_codes(conditions: List[str]) -> Tuple[str, str, str]:
         if i == 0:
             if match:
                 primary_code = match['code']
+                primary_title = match['title']
+                icd_block = match.get('block', 'Unknown')
                 icd_category = _icd_chapter_from_code(match['code'])
             else:
                 primary_code = 'Not found'
+                primary_title = 'Not found'
+                icd_block = 'Unknown'
                 icd_category = 'Unknown'
         else:
             if match:
-                secondary_parts.append(f"{condition}: {match['code']}")
+                secondary_parts.append(f"{condition}: {match['title']} ({match['code']})")
             else:
                 secondary_parts.append(f"{condition}: Not found")
 
     secondary_codes = " | ".join(secondary_parts) if secondary_parts else "N/A"
-    return primary_code, icd_category, secondary_codes
+    return primary_code, primary_title, icd_block, icd_category, secondary_codes
 
 
 
@@ -1268,7 +1341,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     health_canada_approval_str = fetch_health_canada_approval(intervention_names)
     fda_status_str, fda_safety_str, preg_contra_str, lact_contra_str, cited_str = fetch_fda_info(intervention_names, nct_id)
     openfda_pharm_class_str = fetch_openfda_pharm_class(intervention_names)
-    icd_primary_code, icd_category, icd_secondary_codes = fetch_icd_codes(conditions)
+    icd_primary_code, icd_primary_title, icd_block, icd_category, icd_secondary_codes = fetch_icd_codes(conditions)
     
     # Calculate Consistency
     consistency_str = "N/A"
@@ -1377,6 +1450,8 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'Cited in FDA Label': cited_str,
         'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_str,
         'ICD-11 Primary Code': icd_primary_code,
+        'ICD-11 Primary Title': icd_primary_title,
+        'ICD-11 Block': icd_block,
         'ICD-11 Category': icd_category,
         'ICD-11 Secondary Codes': icd_secondary_codes,
         'Approval Consistency': consistency_str,
@@ -1771,7 +1846,7 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'funder_info', 'lead_sponsor', 'lead_sponsor_class', 'collaborators',
         'Health Canada Approval', 'FDA Approved Status', 'Approval Consistency', 'FDA Pregnancy & Lactation Safety',
         'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)',
-        'ICD-11 Primary Code', 'ICD-11 Category', 'ICD-11 Secondary Codes'
+        'ICD-11 Primary Code', 'ICD-11 Primary Title', 'ICD-11 Block', 'ICD-11 Category', 'ICD-11 Secondary Codes'
     ]
     
     # Add all AI columns from config
