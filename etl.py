@@ -1034,6 +1034,108 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
     return epc_str, pe_str
 
 
+_openfda_approval_date_cache = {}
+
+def _query_openfda_earliest_approval(query: str) -> Optional[str]:
+    q_upper = query.upper()
+    if q_upper in _openfda_approval_date_cache:
+        return _openfda_approval_date_cache[q_upper]
+        
+    strategies = [
+        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"",
+    ]
+    
+    api_key = CONFIG.get('openfda_api', {}).get('api_key', '') or os.getenv('OPENFDA_API_KEY', '')
+    api_key_param = f"&api_key={api_key}" if api_key else ""
+    
+    # We use drugsfda endpoint because it has the submissions data
+    for strategy in strategies:
+        url = f"https://api.fda.gov/drug/drugsfda.json?search={strategy}&limit=100{api_key_param}"
+        retries = 3
+        while retries > 0:
+            try:
+                r = requests.get(url, timeout=6)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    retries -= 1
+                    continue
+                if r.status_code != 200:
+                    break
+                    
+                results = r.json().get('results', [])
+                dates = []
+                for res in results:
+                    for sub in res.get('submissions', []):
+                        if sub.get('submission_status') == 'AP' and sub.get('submission_status_date'):
+                            dates.append(sub.get('submission_status_date'))
+                            
+                if dates:
+                    earliest = min(dates)
+                    _openfda_approval_date_cache[q_upper] = earliest
+                    return earliest
+                    
+                break # 200 OK but no submissions found, stop retrying this strategy
+            except Exception:
+                break
+                
+    _openfda_approval_date_cache[q_upper] = None
+    return None
+
+def fetch_openfda_approval_before_trial(interventions: List[str], trial_start_date: str) -> str:
+    if not interventions or not trial_start_date or trial_start_date == 'N/A':
+        return "N/A"
+        
+    # parse trial start date
+    try:
+        from dateutil import parser
+        import datetime
+        default_date = datetime.datetime(2000, 1, 1)
+        parsed = parser.parse(trial_start_date, default=default_date)
+        trial_date_str = parsed.strftime("%Y%m%d")
+    except Exception:
+        return "N/A (Invalid Trial Date)"
+        
+    results = []
+    stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
+    
+    for intv in interventions:
+        if not intv or intv == 'N/A': continue
+        clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
+        if not clean_name: continue
+        
+        words = clean_name.split()
+        clean_words = [w for w in words if w not in stop_words]
+        
+        found = False
+        # Try progressively shorter word sequences (longest first)
+        for length in range(len(clean_words), 0, -1):
+            for start in range(len(clean_words) - length + 1):
+                query = " ".join(clean_words[start:start+length])
+                if len(query) < 4 and length < len(clean_words): continue
+                
+                earliest_approval = _query_openfda_earliest_approval(query)
+                if earliest_approval:
+                    if earliest_approval < trial_date_str:
+                        results.append(f"TRUE [{clean_name.upper()}]")
+                    else:
+                        results.append(f"FALSE [{clean_name.upper()}]")
+                    found = True
+                    break
+            if found:
+                break
+                
+        if not found:
+            base_query = " ".join(clean_words)
+            if _check_openfda_withdrawn(base_query) or _check_openfda_label_exists(base_query):
+                results.append(f"Unknown [{clean_name.upper()}]")
+            else:
+                results.append(f"Not Found in FDA Database [{clean_name.upper()}]")
+                
+    return "\n".join(results) if results else "N/A"
+
+
 
 # ============================================================================
 # ICD-11 API
@@ -1491,6 +1593,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     health_canada_approval_str = fetch_health_canada_approval(intervention_names)
     fda_status_str, fda_safety_str, preg_contra_str, lact_contra_str, cited_str = fetch_fda_info(intervention_names, nct_id)
     openfda_pharm_class_epc_str, openfda_pharm_class_pe_str = fetch_openfda_pharm_class(intervention_names)
+    openfda_approved_before_trial_str = fetch_openfda_approval_before_trial(intervention_names, start_date)
     icd_primary_code, icd_primary_title, icd_block, icd_category, icd_secondary_codes = fetch_icd_codes(conditions)
     
     # Calculate Consistency
@@ -1598,6 +1701,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'FDA Pregnancy Status': preg_contra_str,
         'FDA Lactation Status': lact_contra_str,
         'Cited in FDA Label': cited_str,
+        'Approved Before Trial': openfda_approved_before_trial_str,
         'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_epc_str,
         'OpenFDA Pharmacologic Class (PE)': openfda_pharm_class_pe_str,
         'ICD-11 Primary Code': icd_primary_code,
@@ -1996,7 +2100,7 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'allocation', 'intervention_model', 'primary_purpose', 'masking', 'arm_groups',
         'funder_info', 'lead_sponsor', 'lead_sponsor_class', 'collaborators',
         'Health Canada Approval', 'FDA Approved Status', 'Approval Consistency', 'FDA Pregnancy & Lactation Safety',
-        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)',
+        'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'Approved Before Trial', 'OpenFDA Pharmacologic Class (EPC)',
         'OpenFDA Pharmacologic Class (PE)',
         'ICD-11 Primary Code', 'ICD-11 Primary Title', 'ICD-11 Block', 'ICD-11 Category', 'ICD-11 Secondary Codes'
     ]
