@@ -1323,7 +1323,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         # Track which interventions are explicitly mapped to an EXPERIMENTAL arm
         if 'EXPERIMENTAL' in a_type.upper():
             for mapped_int in arm.get('interventionNames', []):
-                clean_int = mapped_int.split(': ')[-1].strip().lower() if ': ' in mapped_int else mapped_int.strip().lower()
+                clean_int = mapped_int.split(': ', 1)[-1].strip().lower() if ': ' in mapped_int else mapped_int.strip().lower()
                 experimental_interventions.add(clean_int)
     arm_groups_str = '\n'.join(arm_groups_list) if arm_groups_list else 'N/A'
     
