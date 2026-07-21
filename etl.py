@@ -808,7 +808,7 @@ def parse_age_in_years(age_str: str) -> Optional[float]:
 
 _openfda_epc_cache = {}
 
-def _query_openfda_epc(query: str) -> Optional[List[str]]:
+def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
     """
     Query openFDA for Established Pharmacologic Class (EPC) for a drug name.
     
@@ -825,9 +825,9 @@ def _query_openfda_epc(query: str) -> Optional[List[str]]:
         return _openfda_epc_cache[q_upper]
 
     strategies = [
-        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"+AND+_exists_:openfda.pharm_class_epc",
-        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"+AND+_exists_:openfda.pharm_class_epc",
-        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"+AND+_exists_:openfda.pharm_class_epc",
+        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"+AND+%28_exists_:openfda.pharm_class_epc+OR+_exists_:openfda.pharm_class_pe%29",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"+AND+%28_exists_:openfda.pharm_class_epc+OR+_exists_:openfda.pharm_class_pe%29",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"+AND+%28_exists_:openfda.pharm_class_epc+OR+_exists_:openfda.pharm_class_pe%29",
     ]
 
     api_key = CONFIG.get('openfda_api', {}).get('api_key', '') or os.getenv('OPENFDA_API_KEY', '')
@@ -848,21 +848,26 @@ def _query_openfda_epc(query: str) -> Optional[List[str]]:
                 
                 results = r.json().get('results', [])
 
-                # First pass: prefer a result where queried substance appears and has EPC
+                # First pass: prefer a result where queried substance appears and has EPC or PE
                 for res in results:
                     openfda = res.get('openfda', {})
                     substances = [s.upper() for s in openfda.get('substance_name', [])]
                     epc = openfda.get('pharm_class_epc', [])
-                    if epc and any(q_upper in s for s in substances):
-                        _openfda_epc_cache[q_upper] = epc
-                        return epc
+                    pe = openfda.get('pharm_class_pe', [])
+                    if (epc or pe) and any(q_upper in s for s in substances):
+                        ans = {'epc': epc, 'pe': pe}
+                        _openfda_epc_cache[q_upper] = ans
+                        return ans
 
-                # Second pass: any result with EPC (relaxed match)
+                # Second pass: any result with EPC or PE (relaxed match)
                 for res in results:
-                    epc = res.get('openfda', {}).get('pharm_class_epc', [])
-                    if epc:
-                        _openfda_epc_cache[q_upper] = epc
-                        return epc
+                    openfda = res.get('openfda', {})
+                    epc = openfda.get('pharm_class_epc', [])
+                    pe = openfda.get('pharm_class_pe', [])
+                    if epc or pe:
+                        ans = {'epc': epc, 'pe': pe}
+                        _openfda_epc_cache[q_upper] = ans
+                        return ans
                 
                 break # 200 OK but no EPC found, stop retrying this strategy
 
@@ -968,12 +973,14 @@ def _check_openfda_label_exists(query: str) -> bool:
     return False
 
 
-def fetch_openfda_pharm_class(interventions: List[str]) -> str:
+def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
     if not interventions:
-        return "N/A"
+        return "N/A", "N/A"
         
     has_epc_list = []
     no_epc_list = []
+    has_pe_list = []
+    no_pe_list = []
     stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
     
     for intv in interventions:
@@ -991,9 +998,20 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
                 query = " ".join(clean_words[start:start+length])
                 if len(query) < 4 and length < len(clean_words): continue
                 
-                epc = _query_openfda_epc(query)
-                if epc:
-                    has_epc_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
+                data = _query_openfda_epc(query)
+                if data:
+                    epc = data.get('epc', [])
+                    pe = data.get('pe', [])
+                    if epc:
+                        has_epc_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
+                    else:
+                        no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
+                        
+                    if pe:
+                        has_pe_list.append(f"{', '.join(pe)} [{clean_name.upper()}]")
+                    else:
+                        no_pe_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
+                        
                     found_epc = True
                     break
             if found_epc:
@@ -1003,13 +1021,17 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
             base_query = " ".join(clean_words)
             if _check_openfda_withdrawn(base_query):
                 no_epc_list.append(f"Withdrawn [{clean_name.upper()}]")
+                no_pe_list.append(f"Withdrawn [{clean_name.upper()}]")
             elif _check_openfda_label_exists(base_query):
                 no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
+                no_pe_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
             else:
                 no_epc_list.append(f"Not Found in FDA Database [{clean_name.upper()}]")
+                no_pe_list.append(f"Not Found in FDA Database [{clean_name.upper()}]")
         
-    classes_list = has_epc_list + no_epc_list
-    return "\n".join(classes_list) if classes_list else "N/A"
+    epc_str = "\n".join(has_epc_list + no_epc_list) if (has_epc_list or no_epc_list) else "N/A"
+    pe_str = "\n".join(has_pe_list + no_pe_list) if (has_pe_list or no_pe_list) else "N/A"
+    return epc_str, pe_str
 
 
 
@@ -1463,7 +1485,7 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     
     health_canada_approval_str = fetch_health_canada_approval(intervention_names)
     fda_status_str, fda_safety_str, preg_contra_str, lact_contra_str, cited_str = fetch_fda_info(intervention_names, nct_id)
-    openfda_pharm_class_str = fetch_openfda_pharm_class(intervention_names)
+    openfda_pharm_class_epc_str, openfda_pharm_class_pe_str = fetch_openfda_pharm_class(intervention_names)
     icd_primary_code, icd_primary_title, icd_block, icd_category, icd_secondary_codes = fetch_icd_codes(conditions)
     
     # Calculate Consistency
@@ -1571,7 +1593,8 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
         'FDA Pregnancy Status': preg_contra_str,
         'FDA Lactation Status': lact_contra_str,
         'Cited in FDA Label': cited_str,
-        'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_str,
+        'OpenFDA Pharmacologic Class (EPC)': openfda_pharm_class_epc_str,
+        'OpenFDA Pharmacologic Class (PE)': openfda_pharm_class_pe_str,
         'ICD-11 Primary Code': icd_primary_code,
         'ICD-11 Primary Title': icd_primary_title,
         'ICD-11 Block': icd_block,
@@ -1969,6 +1992,7 @@ def load_to_csv(studies: List[Dict[str, Any]], filename: Optional[str] = None) -
         'funder_info', 'lead_sponsor', 'lead_sponsor_class', 'collaborators',
         'Health Canada Approval', 'FDA Approved Status', 'Approval Consistency', 'FDA Pregnancy & Lactation Safety',
         'FDA Pregnancy Status', 'FDA Lactation Status', 'Cited in FDA Label', 'OpenFDA Pharmacologic Class (EPC)',
+        'OpenFDA Pharmacologic Class (PE)',
         'ICD-11 Primary Code', 'ICD-11 Primary Title', 'ICD-11 Block', 'ICD-11 Category', 'ICD-11 Secondary Codes'
     ]
     
