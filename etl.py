@@ -1405,21 +1405,26 @@ def transform_study_data(study: Dict[Any, Any]) -> Dict[str, Any]:
     province_counts: Dict[str, int] = {}
 
     for loc in locations:
-        facility = loc.get('facility', 'Unknown Facility')
-        city     = loc.get('city', '')
-        state    = loc.get('state', '')   # province in Canada
-        country  = loc.get('country', 'Unknown Country')
+        facility = loc.get('facility', '').strip()
+        if not facility: facility = '[Missing Facility]'
+        
+        city = loc.get('city', '').strip()
+        state = loc.get('state', '').strip()
+        
+        country = loc.get('country', '').strip()
+        if not country: country = '[Missing Country]'
 
         detail_parts = [facility]
-        if city:    detail_parts.append(city)
-        if state:   detail_parts.append(state)
-        if country: detail_parts.append(f"({country})")
+        detail_parts.append(city if city else '[Missing City]')
+        detail_parts.append(state if state else '[Missing Province/State]')
+        detail_parts.append(f"({country})")
+        
         sites_list.append(', '.join(detail_parts))
 
-        city_key = city if city else 'Unknown'
+        city_key = city if city else '[Missing City]'
         city_counts[city_key] = city_counts.get(city_key, 0) + 1
 
-        province_key = state if state else 'Unknown'
+        province_key = state if state else '[Missing Province/State]'
         province_counts[province_key] = province_counts.get(province_key, 0) + 1
 
     sites_detail_str    = '; '.join(sites_list) if sites_list else 'N/A'
