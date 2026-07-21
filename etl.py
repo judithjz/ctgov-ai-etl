@@ -891,7 +891,7 @@ def _check_openfda_withdrawn(query: str) -> bool:
     api_key_param = f"&api_key={api_key}" if api_key else ""
 
     for strategy in strategies:
-        url = f"https://api.fda.gov/drug/drugsfda.json?search={strategy}&limit=5{api_key_param}"
+        url = f"https://api.fda.gov/drug/drugsfda.json?search={strategy}&limit=100{api_key_param}"
         retries = 3
         while retries > 0:
             try:
@@ -904,13 +904,27 @@ def _check_openfda_withdrawn(query: str) -> bool:
                     break
                 
                 results = r.json().get('results', [])
+                
+                has_active = False
+                has_discontinued = False
+                
                 for res in results:
                     for p in res.get('products', []):
                         status = p.get('marketing_status', '').upper()
                         if status in ['DISCONTINUED', 'WITHDRAWN', 'PRESCRIPTION - DISCONTINUED']:
-                            _openfda_withdrawn_cache[q_upper] = True
-                            return True
-                break
+                            has_discontinued = True
+                        elif status:
+                            has_active = True
+                
+                # If we found any active product on the market, it's not withdrawn
+                if has_active:
+                    _openfda_withdrawn_cache[q_upper] = False
+                    return False
+                    
+                # If everything we found is discontinued, it is withdrawn
+                if has_discontinued and not has_active:
+                    _openfda_withdrawn_cache[q_upper] = True
+                    return True
             except Exception:
                 break
                 
