@@ -917,6 +917,43 @@ def _check_openfda_withdrawn(query: str) -> bool:
     _openfda_withdrawn_cache[q_upper] = False
     return False
 
+_openfda_label_exists_cache = {}
+
+def _check_openfda_label_exists(query: str) -> bool:
+    q_upper = query.upper()
+    if q_upper in _openfda_label_exists_cache:
+        return _openfda_label_exists_cache[q_upper]
+
+    strategies = [
+        f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"",
+    ]
+    
+    api_key = CONFIG.get('openfda_api', {}).get('api_key', '')
+    api_key_param = f"&api_key={api_key}" if api_key else ""
+
+    for strategy in strategies:
+        url = f"https://api.fda.gov/drug/label.json?search={strategy}&limit=1{api_key_param}"
+        retries = 3
+        while retries > 0:
+            try:
+                r = requests.get(url, timeout=6)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    retries -= 1
+                    continue
+                if r.status_code == 200:
+                    _openfda_label_exists_cache[q_upper] = True
+                    return True
+                break
+            except Exception:
+                break
+                
+    _openfda_label_exists_cache[q_upper] = False
+    return False
+
+
 def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     if not interventions:
         return "N/A"
@@ -952,8 +989,10 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
             base_query = " ".join(clean_words)
             if _check_openfda_withdrawn(base_query):
                 no_epc_list.append(f"Withdrawn [{clean_name.upper()}]")
+            elif _check_openfda_label_exists(base_query):
+                no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
             else:
-                no_epc_list.append(f"N/A [{clean_name.upper()}]")
+                no_epc_list.append(f"Not Found in FDA Database [{clean_name.upper()}]")
         
     classes_list = has_epc_list + no_epc_list
     return "\n".join(classes_list) if classes_list else "N/A"
