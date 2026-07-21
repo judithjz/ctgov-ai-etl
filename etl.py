@@ -877,7 +877,8 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     if not interventions:
         return "N/A"
         
-    classes_list = []
+    has_epc_list = []
+    no_epc_list = []
     stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
     
     for intv in interventions:
@@ -897,15 +898,16 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
                 
                 epc = _query_openfda_epc(query)
                 if epc:
-                    classes_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
+                    has_epc_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
                     found_epc = True
                     break
             if found_epc:
                 break
                 
         if not found_epc:
-            classes_list.append(f"N/A [{clean_name.upper()}]")
+            no_epc_list.append(f"N/A [{clean_name.upper()}]")
         
+    classes_list = has_epc_list + no_epc_list
     return "\n".join(classes_list) if classes_list else "N/A"
 
 
