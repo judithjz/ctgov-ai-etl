@@ -873,6 +873,50 @@ def _query_openfda_epc(query: str) -> Optional[List[str]]:
     return None
 
 
+_openfda_withdrawn_cache = {}
+
+def _check_openfda_withdrawn(query: str) -> bool:
+    q_upper = query.upper()
+    if q_upper in _openfda_withdrawn_cache:
+        return _openfda_withdrawn_cache[q_upper]
+
+    strategies = [
+        f"products.active_ingredients.name:\"{urllib.parse.quote(q_upper)}\"",
+        f"products.brand_name:\"{urllib.parse.quote(q_upper)}\"",
+        f"openfda.generic_name:\"{urllib.parse.quote(query)}\"",
+        f"openfda.brand_name:\"{urllib.parse.quote(query)}\"",
+    ]
+    
+    api_key = CONFIG.get('openfda_api', {}).get('api_key', '')
+    api_key_param = f"&api_key={api_key}" if api_key else ""
+
+    for strategy in strategies:
+        url = f"https://api.fda.gov/drug/drugsfda.json?search={strategy}&limit=5{api_key_param}"
+        retries = 3
+        while retries > 0:
+            try:
+                r = requests.get(url, timeout=6)
+                if r.status_code == 429:
+                    time.sleep(2.0)
+                    retries -= 1
+                    continue
+                if r.status_code != 200:
+                    break
+                
+                results = r.json().get('results', [])
+                for res in results:
+                    for p in res.get('products', []):
+                        status = p.get('marketing_status', '').upper()
+                        if status in ['DISCONTINUED', 'WITHDRAWN', 'PRESCRIPTION - DISCONTINUED']:
+                            _openfda_withdrawn_cache[q_upper] = True
+                            return True
+                break
+            except Exception:
+                break
+                
+    _openfda_withdrawn_cache[q_upper] = False
+    return False
+
 def fetch_openfda_pharm_class(interventions: List[str]) -> str:
     if not interventions:
         return "N/A"
@@ -905,7 +949,11 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> str:
                 break
                 
         if not found_epc:
-            no_epc_list.append(f"N/A [{clean_name.upper()}]")
+            base_query = " ".join(clean_words)
+            if _check_openfda_withdrawn(base_query):
+                no_epc_list.append(f"Withdrawn [{clean_name.upper()}]")
+            else:
+                no_epc_list.append(f"N/A [{clean_name.upper()}]")
         
     classes_list = has_epc_list + no_epc_list
     return "\n".join(classes_list) if classes_list else "N/A"
