@@ -988,7 +988,7 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
         clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
         if not clean_name: continue
         
-        words = clean_name.split()
+        words = clean_name.replace('-', ' ').split()
         clean_words = [w for w in words if w not in stop_words]
         
         found_epc = False
@@ -1105,7 +1105,7 @@ def fetch_openfda_approval_before_trial(interventions: List[str], trial_start_da
         clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
         if not clean_name: continue
         
-        words = clean_name.split()
+        words = clean_name.replace('-', ' ').split()
         clean_words = [w for w in words if w not in stop_words]
         
         found = False
