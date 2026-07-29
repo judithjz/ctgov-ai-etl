@@ -806,7 +806,60 @@ def parse_age_in_years(age_str: str) -> Optional[float]:
     return None
 
 
+
+_openfda_disk_cache = None
+_openfda_disk_cache_dirty = False
+
+def _openfda_cache_file() -> str:
+    config = CONFIG.get('openfda_api', {})
+    return config.get('cache_file', 'openfda_cache.yaml')
+
+def _use_openfda_cache() -> bool:
+    config = CONFIG.get('openfda_api', {})
+    return config.get('use_cache', True)
+
+def _ensure_openfda_disk_cache() -> dict:
+    global _openfda_disk_cache
+    if _openfda_disk_cache is not None:
+        return _openfda_disk_cache
+
+    path = _openfda_cache_file()
+    if os.path.exists(path):
+        try:
+            import yaml
+            with open(path, 'r', encoding='utf-8') as f:
+                loaded = yaml.safe_load(f)
+            _openfda_disk_cache = loaded if isinstance(loaded, dict) else {}
+            print(f"✅ Loaded OpenFDA cache from {path}")
+        except Exception as e:
+            print(f"⚠️ Warning: Could not load OpenFDA cache ({path}): {e}")
+            _openfda_disk_cache = {}
+    else:
+        _openfda_disk_cache = {}
+
+    _openfda_disk_cache.setdefault('epc', {})
+    _openfda_disk_cache.setdefault('approval_date', {})
+    _openfda_disk_cache.setdefault('withdrawn', {})
+    return _openfda_disk_cache
+
+def save_openfda_disk_cache() -> None:
+    global _openfda_disk_cache_dirty
+    if not _openfda_disk_cache_dirty or _openfda_disk_cache is None:
+        return
+    path = _openfda_cache_file()
+    try:
+        import yaml
+        with open(path, 'w', encoding='utf-8') as f:
+            yaml.safe_dump(_openfda_disk_cache, f, default_flow_style=False, sort_keys=True, allow_unicode=True)
+        _openfda_disk_cache_dirty = False
+        print(f"💾 Saved OpenFDA cache to {path}")
+    except Exception as e:
+        print(f"⚠️ Warning: Failed to save OpenFDA cache ({path}): {e}")
+
+atexit.register(save_openfda_disk_cache)
+
 _openfda_epc_cache = {}
+
 
 def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
     """
@@ -820,9 +873,13 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
     queried name appears in the substance_name (to avoid combination-drug
     false matches).
     """
+    global _openfda_disk_cache_dirty
     q_upper = query.upper()
-    if q_upper in _openfda_epc_cache:
-        return _openfda_epc_cache[q_upper]
+    cache_enabled = _use_openfda_cache()
+    if cache_enabled:
+        cache = _ensure_openfda_disk_cache()['epc']
+        if q_upper in cache:
+            return cache[q_upper]
 
     strategies = [
         f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"+AND+%28_exists_:openfda.pharm_class_epc+OR+_exists_:openfda.pharm_class_pe%29",
@@ -856,7 +913,9 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
                     pe = openfda.get('pharm_class_pe', [])
                     if (epc or pe) and any(q_upper in s for s in substances):
                         ans = {'epc': epc, 'pe': pe}
-                        _openfda_epc_cache[q_upper] = ans
+                        if cache_enabled:
+                            _ensure_openfda_disk_cache()['epc'][q_upper] = ans
+                            _openfda_disk_cache_dirty = True
                         return ans
 
                 # Second pass: any result with EPC or PE (relaxed match)
@@ -866,7 +925,9 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
                     pe = openfda.get('pharm_class_pe', [])
                     if epc or pe:
                         ans = {'epc': epc, 'pe': pe}
-                        _openfda_epc_cache[q_upper] = ans
+                        if cache_enabled:
+                            _ensure_openfda_disk_cache()['epc'][q_upper] = ans
+                            _openfda_disk_cache_dirty = True
                         return ans
                 
                 break # 200 OK but no EPC found, stop retrying this strategy
@@ -874,16 +935,22 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
             except Exception:
                 break
                 
-    _openfda_epc_cache[q_upper] = None
+    if cache_enabled:
+        _ensure_openfda_disk_cache()['epc'][q_upper] = None
+        _openfda_disk_cache_dirty = True
     return None
 
 
-_openfda_withdrawn_cache = {}
+
 
 def _check_openfda_withdrawn(query: str) -> bool:
+    global _openfda_disk_cache_dirty
     q_upper = query.upper()
-    if q_upper in _openfda_withdrawn_cache:
-        return _openfda_withdrawn_cache[q_upper]
+    cache_enabled = _use_openfda_cache()
+    if cache_enabled:
+        cache = _ensure_openfda_disk_cache()['withdrawn']
+        if q_upper in cache:
+            return cache[q_upper]
 
     strategies = [
         f"products.active_ingredients.name:\"{urllib.parse.quote(q_upper)}\"",
@@ -933,7 +1000,9 @@ def _check_openfda_withdrawn(query: str) -> bool:
             except Exception:
                 break
                 
-    _openfda_withdrawn_cache[q_upper] = False
+    if cache_enabled:
+        _ensure_openfda_disk_cache()['withdrawn'][q_upper] = False
+        _openfda_disk_cache_dirty = True
     return False
 
 _openfda_label_exists_cache = {}
@@ -1034,12 +1103,16 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
     return epc_str, pe_str
 
 
-_openfda_approval_date_cache = {}
+
 
 def _query_openfda_earliest_approval(query: str) -> Optional[str]:
+    global _openfda_disk_cache_dirty
     q_upper = query.upper()
-    if q_upper in _openfda_approval_date_cache:
-        return _openfda_approval_date_cache[q_upper]
+    cache_enabled = _use_openfda_cache()
+    if cache_enabled:
+        cache = _ensure_openfda_disk_cache()['approval_date']
+        if q_upper in cache:
+            return cache[q_upper]
         
     strategies = [
         f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"",
@@ -1073,14 +1146,18 @@ def _query_openfda_earliest_approval(query: str) -> Optional[str]:
                             
                 if dates:
                     earliest = min(dates)
-                    _openfda_approval_date_cache[q_upper] = earliest
+                    if cache_enabled:
+                        _ensure_openfda_disk_cache()['approval_date'][q_upper] = earliest
+                        _openfda_disk_cache_dirty = True
                     return earliest
                     
                 break # 200 OK but no submissions found, stop retrying this strategy
             except Exception:
                 break
                 
-    _openfda_approval_date_cache[q_upper] = None
+    if cache_enabled:
+        _ensure_openfda_disk_cache()['approval_date'][q_upper] = None
+        _openfda_disk_cache_dirty = True
     return None
 
 def fetch_openfda_approval_before_trial(interventions: List[str], trial_start_date: str) -> str:

@@ -25,6 +25,8 @@ dailymed_api:
   spl_url: https://dailymed.nlm.nih.gov/dailymed/services/v2/spls.json
 
 openfda_api:
+  use_cache: TRUE
+  cache_file: openfda_cache.yaml
   api_key: "s7S1vYs4wNsBWwE6Q6Hi2l579tgrs5SppoNbICGG"
 
 icd_api:
