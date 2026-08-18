@@ -1,7 +1,7 @@
 ctgov:
   api_url: https://clinicaltrials.gov/api/v2/studies
   page_size: 9000
-  resume_from_csv: FALSE
+  resume_from_csv: TRUE
   filter_advanced:
     - AREA[StudyType]INTERVENTIONAL
     - AREA[StartDate]RANGE[2013-05-01,2025-12-31]
@@ -94,10 +94,10 @@ ai_processing:
     # --- REGULATORY API COLUMNS (Toggle by commenting/uncommenting) ---
     
     # 1. FDA DailyMed Columns (Currently ENABLED)
-    DailyMed/FDA SPL API (Approval Status):
-    {FDA Approved Status}
-    DailyMed/FDA SPL API (Pregnancy & Lactation Safety):
-    {FDA Pregnancy & Lactation Safety}
+    # DailyMed/FDA SPL API (Approval Status):
+    # {FDA Approved Status}
+    # DailyMed/FDA SPL API (Pregnancy & Lactation Safety):
+    # {FDA Pregnancy & Lactation Safety}
 
     # 2. Health Canada Columns (Currently DISABLED)
     # Health Canada DPD API (Approval Status):
@@ -161,6 +161,7 @@ ai_processing:
         You will be analyzing information about clinical trials, including the eligibility criteria. 
         When the trial requires the participant to use contraception (also look for terms like "birth control", "abstinence", or "prevent pregnancy"), output "REQUIRED".
         When the trial explicitly says contraception is not required, output "NOT_REQUIRED".
+        When the trial explicitly prohibits the use of contraception or hormonal birth control/medications (e.g. requires washout of hormonal contraceptives, or lists them as exclusion criteria), output "PROHIBITED".
         When the trial does not mention contraception or birth control, output "NOT_MENTIONED". 
         
         Output the outcome of the classification (Only the category name), 
@@ -178,25 +179,43 @@ ai_processing:
     - 
       name: Additional_Eligibility_Needed
       system_instruction: |
-        You will be analyzing information about clinical trials.
-        I want want you to determine if readers need to refer to the full protocol to determine eligibility for this trial.
-        If the eligibility criteria are fully stated in the trial record, output "FALSE".
-        If the eligibility criteria specifies to refer to the protocol for additional eligibility information, output "TRUE", 
-        and provide a quote from the eligibility criteria that supports your decision in parenthesis.
+        You will be analyzing clinical trial eligibility criteria.
+        Focus ONLY on the text under "Eligibility Criteria" (the criteria column).
+        Determine if the eligibility criteria text explicitly references needing to refer to the full protocol document or specific protocol sections (e.g., "refer to protocol", "detailed in the protocol", "as defined in Section X of the protocol") for additional eligibility information.
+        
+        CRITICAL RULE: Do NOT output TRUE for:
+        1. General investigator or sponsor discretion/opinion (e.g., "in the opinion of the investigator", "discretion of the sponsor", "judgment of the investigator").
+        2. Standard study compliance agreements (e.g., "agree to follow study protocol", "willing to comply with protocol requirements").
+        
+        If the eligibility criteria text explicitly refers readers to the protocol document or a specific protocol section/annex for additional eligibility details, output "TRUE", and provide the exact quote from the Eligibility Criteria that supports your decision in parenthesis.
+        Otherwise, output "FALSE".
 
     - 
       name: Special_Circumstances
       system_instruction: |
-        You will be analyzing information about clinical trials.
-        I want you to identify trials that typically exclude pregnant or lactating participants but include specific exceptions or "special circumstances" where they may be allowed (e.g., "unless the investigator determines the benefit outweighs the risk," "except in cases where...", or specific criteria that allows for inclusion despite a general exclusion).
-        This is for finding nuance in trials that are not specifically targeted at pregnant populations.
-        If a specific exception to a general exclusion for pregnancy or lactation is found, output "TRUE" and provide the supporting quote in parentheses.
-        Otherwise, output "FALSE".
-
+        You will be analyzing information about clinical trials, focusing on their eligibility criteria.
         
+        CRITICAL RULE: You must base your analysis ONLY on the provided clinical trial record's eligibility criteria and CTG data. Do NOT assume, extrapolate, or reference any external FDA labeling data, DailyMed drug warnings, or general drug profiles. If an exception is not explicitly written in the trial text, it does not exist.
+
+        I want you to identify trials that generally exclude pregnant or lactating participants but define specific exceptions, nuances, or "special circumstances" under which they might still be included, allowed to continue, or evaluated case-by-case.
+
+        Look for semantic patterns indicating exceptions, such as:
+        1. Benefit/Risk Assessment: "unless the investigator/physician determines the clinical benefit outweighs the risk", "unless deemed medically necessary", "except when in the opinion of the investigator...".
+        2. Continuation During Trial: "if a participant becomes pregnant during the trial, they may continue treatment if...", "in the event of pregnancy, continuation is allowed if...", "allowed to remain on study at the discretion of...".
+        3. Specific Conditions/Approvals: "except in cases of...", "unless specifically approved by the sponsor", "except under protocol amendment...".
+        4. Investigator/Sponsor Discretion: "at the discretion of the treating oncologist/investigator", "with approval from the medical monitor".
+
+        Guidelines:
+        - If you find any such exception or conditional allowance for pregnancy or lactation, output "TRUE" followed by the exact supporting quote from the text in parentheses.
+        - If the trial is a pure exclusion with NO exceptions (e.g., "Pregnant or nursing women are excluded" with no further qualifiers), output "FALSE".
+        - If the trial has no mention of pregnancy/lactation or is NOT_MENTIONED, output "FALSE".
+        
+        Example 1: "Exclusion: Pregnant women, unless in the opinion of the investigator the potential benefit outweighs the risk." -> TRUE (unless in the opinion of the investigator the potential benefit outweighs the risk)
+        Example 2: "If a subject becomes pregnant during the study, treatment must be discontinued immediately unless continuing is clinically indicated and approved by the sponsor." -> TRUE (unless continuing is clinically indicated and approved by the sponsor)
+        Example 3: "Exclusion Criteria: Pregnancy or lactation." -> FALSE
 
 output:
-  csv_filename: test_july13.csv
+  csv_filename: Jul30Dataset.csv
   max_rows_per_file: 9000
 
 tuning_trials:

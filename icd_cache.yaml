@@ -8282,6 +8282,10 @@ glomerular disease:
   block: Glomerular diseases
   code: GB4Z
   title: Glomerular diseases, unspecified
+glomerulonephritis:
+  block: Unknown
+  code: GB40&XT5R
+  title: Acute nephritic syndrome
 glomerulonephritis minimal lesion:
   block: Unknown
   code: GB41/MF8Y
@@ -8290,6 +8294,10 @@ glomerulonephritis, iga:
   block: Unknown
   code: GB40&XT5R
   title: Acute nephritic syndrome
+glomerulopathy:
+  block: Clinical findings in specimens from the urinary system
+  code: MF81
+  title: Fibronectin glomerulopathy
 glomerulosclerosis:
   block: Macroscopic changes of size of the kidney
   code: MF54.0
@@ -10228,6 +10236,10 @@ immunoglobulin a nephropathy (igan):
   block: Clinical findings in specimens from the urinary system
   code: MF8Y
   title: Other specified clinical findings in specimens from the urinary system
+immunoglobulin disease:
+  block: Plasma cell neoplasms
+  code: 2A83.5
+  title: Monoclonal immunoglobulin deposition disease
 immunoglobulin g4 related disease:
   block: Plasma cell neoplasms
   code: 2A83.5
@@ -10832,6 +10844,10 @@ kidney diseases:
   block: Unknown
   code: GC2Z&XA6KU8
   title: Disease of kidney, not elsewhere classified
+kidney diseases, chronic:
+  block: Chronic kidney disease
+  code: GB61.Z
+  title: Chronic kidney disease, stage unspecified
 kidney dysfunction:
   block: Unknown
   code: GC2Z&XA6KU8
@@ -22866,6 +22882,10 @@ urologic neoplasms:
     nervous system or related tissues
   code: 2F9Z
   title: Neoplasms of unknown behaviour of unspecified site
+urological diseases:
+  block: Disorders of muscles
+  code: FB3Z
+  title: Disorders of muscles, unspecified
 urothelial bladder cancer:
   block: Malignant neoplasms of bladder
   code: 2C94.Z

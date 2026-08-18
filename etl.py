@@ -10,6 +10,7 @@ Configuration is loaded from a JSON or YAML file (default: config.yaml).
 from requests import api
 import requests
 import json
+import concurrent.futures
 import csv
 import sys
 import os
@@ -818,24 +819,31 @@ def _use_openfda_cache() -> bool:
     config = CONFIG.get('openfda_api', {})
     return config.get('use_cache', True)
 
+import threading
+_openfda_cache_lock = threading.Lock()
+
 def _ensure_openfda_disk_cache() -> dict:
     global _openfda_disk_cache
     if _openfda_disk_cache is not None:
         return _openfda_disk_cache
 
-    path = _openfda_cache_file()
-    if os.path.exists(path):
-        try:
-            import yaml
-            with open(path, 'r', encoding='utf-8') as f:
-                loaded = yaml.safe_load(f)
-            _openfda_disk_cache = loaded if isinstance(loaded, dict) else {}
-            print(f"✅ Loaded OpenFDA cache from {path}")
-        except Exception as e:
-            print(f"⚠️ Warning: Could not load OpenFDA cache ({path}): {e}")
+    with _openfda_cache_lock:
+        if _openfda_disk_cache is not None:
+            return _openfda_disk_cache
+            
+        path = _openfda_cache_file()
+        if os.path.exists(path):
+            try:
+                import yaml
+                with open(path, 'r', encoding='utf-8') as f:
+                    loaded = yaml.safe_load(f)
+                _openfda_disk_cache = loaded if isinstance(loaded, dict) else {}
+                print(f"✅ Loaded OpenFDA cache from {path}")
+            except Exception as e:
+                print(f"⚠️ Warning: Could not load OpenFDA cache ({path}): {e}")
+                _openfda_disk_cache = {}
+        else:
             _openfda_disk_cache = {}
-    else:
-        _openfda_disk_cache = {}
 
     _openfda_disk_cache.setdefault('epc', {})
     _openfda_disk_cache.setdefault('approval_date', {})
@@ -879,7 +887,14 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
     if cache_enabled:
         cache = _ensure_openfda_disk_cache()['epc']
         if q_upper in cache:
-            return cache[q_upper]
+            val = cache[q_upper]
+            if val is None:
+                llm_val = _query_llm_for_pharm_class(query)
+                if llm_val:
+                    cache[q_upper] = llm_val
+                    _openfda_disk_cache_dirty = True
+                    return llm_val
+            return val
 
     strategies = [
         f"openfda.substance_name:\"{urllib.parse.quote(q_upper)}\"+AND+%28_exists_:openfda.pharm_class_epc+OR+_exists_:openfda.pharm_class_pe%29",
@@ -935,9 +950,88 @@ def _query_openfda_epc(query: str) -> Optional[Dict[str, List[str]]]:
             except Exception:
                 break
                 
+    # Fallback to LLM since OpenFDA returned no structured results
+    llm_val = _query_llm_for_pharm_class(query)
     if cache_enabled:
-        _ensure_openfda_disk_cache()['epc'][q_upper] = None
+        _ensure_openfda_disk_cache()['epc'][q_upper] = llm_val
         _openfda_disk_cache_dirty = True
+    return llm_val
+
+
+def _query_llm_for_pharm_class(query: str) -> Optional[Dict[str, Any]]:
+    """
+    Fallback function using Gemini to resolve drug Established Pharmacologic Class (EPC)
+    and Physiological Effect (PE) when OpenFDA fails.
+    """
+    from google import genai
+    from google.genai import types
+    import json
+
+    ai_config = CONFIG.get('ai_processing', {})
+    api_key_env = ai_config.get('api_key_env', 'GEMINI_API_KEY')
+    gemini_api_key = os.getenv(api_key_env, '')
+
+    try:
+        # Initialize Google GenAI client (Vertex AI mode matching initialize_gemini_models)
+        client = genai.Client(
+            vertexai=True,
+            project="project-0b52e79a-4960-471d-9d8",
+            location="us-central1"
+        )
+        
+        prompt = f"""
+        Analyze the drug substance or product name: "{query}"
+        Identify its FDA Established Pharmacologic Class (EPC) and Physiological Effect (PE) if they exist.
+        Also, provide a short, credible medical database or labeling source name for this class information (e.g. NCI Thesaurus, DailyMed, RxNorm, or FDA Innohep Label).
+        
+        Provide your output strictly in JSON format as a dictionary with three keys:
+        - "epc": a list of strings representing the EPC class names (e.g. ["Low Molecular Weight Heparin [EPC]"])
+        - "pe": a list of strings representing the PE names (e.g. ["Decreased Coagulation Activity [PE]"])
+        - "source": a string naming the source (e.g. "NCI Thesaurus")
+        
+        If it is a combination drug, you can list the classes for all components.
+        If it is not a real drug, return empty lists and "Unknown Source".
+        
+        JSON:
+        """
+        
+        # Exponential backoff retry mechanism to survive Vertex 429s
+        import random
+        import time
+        retries = 5
+        delay = 1.0
+        response = None
+        
+        while retries > 0:
+            try:
+                response = client.models.generate_content(
+                    model='gemini-2.5-flash',
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"
+                    )
+                )
+                if response and response.text:
+                    break
+            except Exception as e:
+                if '429' in str(e) or 'Resource exhausted' in str(e):
+                    # Back off and wait
+                    sleep_time = delay + random.uniform(0, 1)
+                    time.sleep(sleep_time)
+                    delay *= 2
+                    retries -= 1
+                else:
+                    raise e
+                    
+        if not response or not response.text:
+            return None
+            
+        data = json.loads(response.text)
+        if isinstance(data, dict) and 'epc' in data and 'pe' in data:
+            data.setdefault('source', 'LLM Medical Knowledge')
+            return data
+    except Exception as e:
+        print(f"⚠️ Warning: LLM pharmacologic class fallback failed for '{query}': {e}")
     return None
 
 
@@ -1052,16 +1146,14 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
     no_pe_list = []
     stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
     
-    for intv in interventions:
-        if not intv or intv == 'N/A': continue
+    def _process_intv(intv):
+        if not intv or intv == 'N/A': return None
         clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
-        if not clean_name: continue
+        if not clean_name: return None
         
         words = clean_name.replace('-', ' ').split()
         clean_words = [w for w in words if w not in stop_words]
         
-        found_epc = False
-        # Try progressively shorter word sequences (longest first)
         for length in range(len(clean_words), 0, -1):
             for start in range(len(clean_words) - length + 1):
                 query = " ".join(clean_words[start:start+length])
@@ -1069,29 +1161,44 @@ def fetch_openfda_pharm_class(interventions: List[str]) -> tuple[str, str]:
                 
                 data = _query_openfda_epc(query)
                 if data:
-                    epc = data.get('epc', [])
-                    pe = data.get('pe', [])
-                    if epc:
-                        has_epc_list.append(f"{', '.join(epc)} [{clean_name.upper()}]")
-                    else:
-                        no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
-                        
-                    if pe:
-                        has_pe_list.append(f"{', '.join(pe)} [{clean_name.upper()}]")
-                    else:
-                        no_pe_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
-                        
-                    found_epc = True
-                    break
-            if found_epc:
-                break
+                    return clean_name, data, False, False
+
+        # If not found, check withdrawn and label exists
+        base_query = " ".join(clean_words)
+        is_withdrawn = _check_openfda_withdrawn(base_query)
+        label_exists = False
+        if not is_withdrawn:
+            label_exists = _check_openfda_label_exists(base_query)
+            
+        return clean_name, None, is_withdrawn, label_exists
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(interventions))) as executor:
+        results = list(executor.map(_process_intv, interventions))
+        
+    for res in results:
+        if not res: continue
+        clean_name, data, is_withdrawn, label_exists = res
+        
+        if data:
+            epc = data.get('epc', [])
+            pe = data.get('pe', [])
+            source = data.get('source')
+            source_suffix = f" (Source: LLM - {source})" if source else ""
+            
+            if epc:
+                has_epc_list.append(f"{', '.join(epc)} [{clean_name.upper()}]{source_suffix}")
+            else:
+                no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]{source_suffix}")
                 
-        if not found_epc:
-            base_query = " ".join(clean_words)
-            if _check_openfda_withdrawn(base_query):
+            if pe:
+                has_pe_list.append(f"{', '.join(pe)} [{clean_name.upper()}]{source_suffix}")
+            else:
+                no_pe_list.append(f"Missing from FDA Label [{clean_name.upper()}]{source_suffix}")
+        else:
+            if is_withdrawn:
                 no_epc_list.append(f"Withdrawn [{clean_name.upper()}]")
                 no_pe_list.append(f"Withdrawn [{clean_name.upper()}]")
-            elif _check_openfda_label_exists(base_query):
+            elif label_exists:
                 no_epc_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
                 no_pe_list.append(f"Missing from FDA Label [{clean_name.upper()}]")
             else:
@@ -1177,16 +1284,14 @@ def fetch_openfda_approval_before_trial(interventions: List[str], trial_start_da
     results = []
     stop_words = {'vaccination', 'vaccine', 'with', 'injection', 'of', 'for', 'dose', 'regimen', 'therapy', 'treatment', 'placebo', 'saline', 'adjuvant', 'and'}
     
-    for intv in interventions:
-        if not intv or intv == 'N/A': continue
+    def _process_approval(intv):
+        if not intv or intv == 'N/A': return None
         clean_name = re.sub(r'^[^:]+:\s*', '', intv).strip().lower()
-        if not clean_name: continue
+        if not clean_name: return None
         
         words = clean_name.replace('-', ' ').split()
         clean_words = [w for w in words if w not in stop_words]
         
-        found = False
-        # Try progressively shorter word sequences (longest first)
         for length in range(len(clean_words), 0, -1):
             for start in range(len(clean_words) - length + 1):
                 query = " ".join(clean_words[start:start+length])
@@ -1194,22 +1299,24 @@ def fetch_openfda_approval_before_trial(interventions: List[str], trial_start_da
                 
                 earliest_approval = _query_openfda_earliest_approval(query)
                 if earliest_approval:
-                    if earliest_approval < trial_date_str:
-                        results.append(f"TRUE [{clean_name.upper()}]")
-                    else:
-                        results.append(f"FALSE [{clean_name.upper()}]")
-                    found = True
-                    break
-            if found:
-                break
-                
-        if not found:
-            base_query = " ".join(clean_words)
-            if _check_openfda_withdrawn(base_query) or _check_openfda_label_exists(base_query):
-                results.append(f"Unknown [{clean_name.upper()}]")
+                    return clean_name, earliest_approval
+                    
+        return clean_name, None
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(5, len(interventions))) as executor:
+        futures_results = list(executor.map(_process_approval, interventions))
+        
+    for res in futures_results:
+        if not res: continue
+        clean_name, earliest_approval = res
+        if earliest_approval:
+            if earliest_approval < trial_date_str:
+                results.append(f"TRUE [{clean_name.upper()}]")
             else:
-                results.append(f"Not Found in FDA Database [{clean_name.upper()}]")
-                
+                results.append(f"FALSE [{clean_name.upper()}]")
+        else:
+            results.append(f"Not Found in FDA Database [{clean_name.upper()}]")
+
     return "\n".join(results) if results else "N/A"
 
 
@@ -1914,10 +2021,14 @@ def process_study_with_ai(model_ctx: Dict[str, Any], study_data: Dict[str, Any])
     Returns:
         Optional[str]: AI-determined value or None if failed
     """
+    class SafeDict(dict):
+        def __missing__(self, key):
+            return 'N/A'
+
     # Format the row prompt with study data
     ai_config = CONFIG.get('ai_processing', {})
     row_prompt_template = ai_config.get('row_prompt_template', '')
-    row_prompt = row_prompt_template.format(**study_data)
+    row_prompt = row_prompt_template.format_map(SafeDict(study_data))
 
     # Get AI response (context already set via system instruction)
     result = get_gemini_response(model_ctx, row_prompt)
