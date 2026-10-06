@@ -85,26 +85,6 @@ ai_processing:
     Trial Sites:
     {sites_detail}
 
-    # External Publications (CT.gov):
-    # {publications}
-
-    # Published Literature (PubMed Search):
-    # {pubmed_publications}
-
-    # --- REGULATORY API COLUMNS (Toggle by commenting/uncommenting) ---
-    
-    # 1. FDA DailyMed Columns (Currently ENABLED)
-    # DailyMed/FDA SPL API (Approval Status):
-    # {FDA Approved Status}
-    # DailyMed/FDA SPL API (Pregnancy & Lactation Safety):
-    # {FDA Pregnancy & Lactation Safety}
-
-    # 2. Health Canada Columns (Currently DISABLED)
-    # Health Canada DPD API (Approval Status):
-    # {Health Canada Approval}
-    # Regulatory Consistency:
-    # {Approval Consistency}
-    # (Describes if Health Canada and FDA are consistent with approval. Output is "Consistent" or "Inconsistent")
   columns:
     -
       name: pregnancy_classification
@@ -153,7 +133,7 @@ ai_processing:
         Example 3: === Inclusion Criteria: (no mention of breastfeeding) ... Exclusion Criteria: pregnant women === NOT_MENTIONED; 
         Example 4: === Inclusion Criteria: postpartum... Exclusion Criteria: breastfeeding; lactating or lactation; chestfeeding; nursing ... === POSTPARTUM_ONLY 'postpartum without breastfeeding'; 
 
-        You are to output the outcome of the classification (Only the category name, not the full text of the category), 
+        You are to output the outcome of the classification (Only the category name), 
         and then quote the part of the criteria that gave you confidence as to the result. 
     - 
       name: contraception_classification
@@ -166,7 +146,6 @@ ai_processing:
         
         Output the outcome of the classification (Only the category name), 
         and then quote the part of the criteria that gave you confidence as to the result.
-
 
     - 
       name: Trial_Sites
@@ -215,11 +194,10 @@ ai_processing:
         Example 3: "Exclusion Criteria: Pregnancy or lactation." -> FALSE
 
 output:
-  csv_filename: Jul30Dataset.csv
+  csv_filename: Dataset.csv
   max_rows_per_file: 9000
 
 tuning_trials:
-  
   - NCT01972217
   - NCT02531516
   - NCT02624089
@@ -268,7 +246,3 @@ tuning_trials:
   - NCT07098887
   - NCT01731444
   - NCT01782755
-
-
-
-
